@@ -373,7 +373,7 @@ $Project "Server (Portal)"
                         $File   "$SRCDIR\game\shared\portal\trigger_tractorbeam_shared.h"
                         $File   "$SRCDIR\game\shared\portal\trigger_tractorbeam_shared.cpp"
 
-                        $Folder "Paint"
+/*                        $Folder "Paint"
                         {
 
                                 // shared
@@ -423,14 +423,12 @@ $Project "Server (Portal)"
                                 $File   "portal\paint_stream.cpp"
                                 $File   "portal\paint_sphere.h"
                                 $File   "portal\paint_sphere.cpp"
-                                $File   "portal\func_savedeleter_volume.h"
-                                $File   "portal\func_savedeleter_volume.cpp"                                            
                                 $Folder "Additional Link Libraries"
                                 {
                                         $Lib    "$LIBPUBLIC\meshutils"
                                 }
                         }
-
+*/
 			$Folder	"Weapons"
 			{
 				$File	"$SRCDIR\game\server\portal\weapon_physcannon.cpp"

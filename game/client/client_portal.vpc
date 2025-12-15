@@ -190,11 +190,9 @@ $Project "Client (Portal)"
 			$File   "portal\c_prop_tractorbeam.cpp"
 			$File   "portal\c_trigger_tractorbeam.h"
 			$File   "portal\c_trigger_tractorbeam.cpp"
-			$File   "portal\c_point_paint_detector.h"
-			$File   "portal\c_point_paint_detector.cpp"
 			$File   "$SRCDIR\game\shared\portal\trigger_tractorbeam_shared.cpp" // NOTE: Portal 2's Server VPC doesn't have this.
 
-			$Folder "Paint"
+/*			$Folder "Paint"
 			{
 			    // shared
 			    $File   "$SRCDIR\game\shared\portal\paintable_entity.h"
@@ -251,7 +249,7 @@ $Project "Client (Portal)"
 			        $Lib "$LIBPUBLIC\meshutils"
 			    }
 			}
-
+*/
 			$Folder	"Weapons"
 			{
 				$File	"portal\c_weapon_physcannon.cpp"
