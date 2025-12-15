@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -108,7 +108,7 @@ public:
 	virtual float GetFireRate( void ) { return 0.7; };
 	void WeaponIdle( void );
 
-	PortalWeaponID GetWeaponID( void ) const { return WEAPON_PORTALGUN; }
+	int GetWeaponID( void ) const { return WEAPON_PORTALGUN; }
 
 protected:
 

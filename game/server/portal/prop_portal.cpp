@@ -31,6 +31,7 @@
 #include "func_portal_orientation.h"
 #include "env_debughistory.h"
 #include "tier1/callqueue.h"
+#include "baseprojectedentity.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -77,6 +78,8 @@ BEGIN_DATADESC( CProp_Portal )
 	
 	DEFINE_FIELD( m_bSharedEnvironmentConfiguration, FIELD_BOOLEAN ),
 	DEFINE_ARRAY( m_vPortalCorners, FIELD_POSITION_VECTOR, 4 ),
+
+	DEFINE_FIELD( m_qLastPortalAngles, FIELD_VECTOR ),
 
 	// Function Pointers
 	DEFINE_THINKFUNC( DelayedPlacementThink ),
@@ -153,6 +156,8 @@ CProp_Portal::CProp_Portal( void )
 	pPolyhedron->Release();
 	Assert( pConvex != NULL );
 	m_pCollisionShape = physcollision->ConvertConvexToCollide( &pConvex, 1 );
+
+	m_qLastPortalAngles = vec3_angle;
 
 	CProp_Portal_Shared::AllPortals.AddToTail( this );
 }
@@ -370,6 +375,9 @@ void CProp_Portal::DelayedPlacementThink( void )
 	NewLocation( m_vDelayedPosition, m_qDelayedAngles );
 
 	SetContextThink( &CProp_Portal::TestRestingSurfaceThink, gpGlobals->curtime + 0.1f, s_pTestRestingSurfaceContext );
+
+	// Adding this breaks the "wake" fix, it's too late to debug right now
+	//CBaseProjector::TestAllForProjectionChanges();
 }
 
 //-----------------------------------------------------------------------------
@@ -644,6 +652,10 @@ void CProp_Portal::FizzleThink( void )
 	}
 
 	SetContextThink( NULL, TICK_NEVER_THINK, s_pFizzleThink );
+	
+	BroadcastPortalEvent( PORTALEVENT_FIZZLE );
+	
+	CBaseProjector::TestAllForProjectionChanges();
 }
 
 
@@ -971,11 +983,25 @@ void CProp_Portal::TeleportTouchingEntity( CBaseEntity *pOther )
 		}
 		else if ( bPlayer && pOther->VPhysicsGetObject() )
 		{
-			pOther->VPhysicsGetObject()->GetVelocity( &vOtherVelocity, NULL );
-
-			if ( vOtherVelocity == vec3_origin )
+			// RETRACT: HACK!
+			// Forcibly use the AbsVelocity while catapulting in pr_24
+			if ( //( !stricmp( gpGlobals->mapname.ToCStr(), "pr_14" ) || !stricmp( gpGlobals->mapname.ToCStr(), "pr_24" ) ) &&
+				pOtherAsPlayer->m_bCatapulted )
 			{
 				vOtherVelocity = pOther->GetAbsVelocity();
+			}
+			else if ( pOtherAsPlayer->GetPaintPower( SPEED_POWER ).m_State != INACTIVE_PAINT_POWER )
+			{
+				vOtherVelocity = pOther->GetAbsVelocity();
+			}
+			else
+			{
+				pOther->VPhysicsGetObject()->GetVelocity( &vOtherVelocity, NULL );
+
+				if ( vOtherVelocity == vec3_origin )
+				{
+					vOtherVelocity = pOther->GetAbsVelocity();
+				}
 			}
 		}
 		else
@@ -1199,6 +1225,14 @@ void CProp_Portal::TeleportTouchingEntity( CBaseEntity *pOther )
 			//pOtherAsPlayer->m_angEyeAngles = qTransformedEyeAngles;
 			//pOtherAsPlayer->pl.v_angle = qTransformedEyeAngles;
 			//pOtherAsPlayer->pl.fixangle = FIXANGLE_ABSOLUTE;
+			
+			// RETRACT:
+			// Remove this eventually and do a proper test for portals!
+			//if ( !stricmp( gpGlobals->mapname.ToCStr(), "pr_14" ) )
+			{
+				EndTouch( pOtherAsPlayer );
+				pOtherAsPlayer->TestPortalTouch();
+			}
 		}
 		else
 		{
@@ -1746,7 +1780,7 @@ void CProp_Portal::ForceEntityToFitInPortalWall( CBaseEntity *pEntity )
 		{
 			Vector ptNewPos = ShortestTrace.endpos + vEntityCenterToOrigin;
 			pEntity->Teleport( &ptNewPos, NULL, NULL );
-			pEntity->IncrementInterpolationFrame();
+			pEntity->AddEffects( EF_NOINTERP );
 #if !defined ( DISABLE_DEBUG_HISTORY )
 			if ( !IsMarkedForDeletion() )
 			{
@@ -1765,6 +1799,13 @@ void CProp_Portal::ForceEntityToFitInPortalWall( CBaseEntity *pEntity )
 void CProp_Portal::UpdatePortalTeleportMatrix( void )
 {
 	ResetModel();
+
+	ALIGN16 matrix3x4_t finalMatrix;
+	AngleMatrix( GetAbsAngles(), finalMatrix );
+	MatrixGetColumn( finalMatrix, 0, m_vForward );
+	MatrixGetColumn( finalMatrix, 1, m_vRight );
+	MatrixGetColumn( finalMatrix, 2, m_vUp );
+	m_vRight = -m_vRight;
 
 	//setup our origin plane
 	GetVectors( &m_plane_Origin.normal, NULL, NULL );
@@ -1827,6 +1868,47 @@ void CProp_Portal::UpdatePortalTeleportMatrix( void )
 	}
 }
 
+bool ShouldCreateMicrophones( void )
+{
+	const char *s_pszNoMicMaps[] = 
+	{
+		"pr_20",
+		"pr_21",
+		"pr2_20",
+	};
+
+	for ( int i = 0; i < ARRAYSIZE( s_pszNoMicMaps ); ++i )
+	{
+		if ( !strcmp( gpGlobals->mapname.ToCStr(), s_pszNoMicMaps[i] ) )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+#if 0
+//-----------------------------------------------------------------------------
+// Purpose: Kinda sucks... Normal triggers won't find portals because they're also triggers.
+//			Rather than addressing that directly, portal detectors look for portals with an explicit OBB check.
+//			
+//-----------------------------------------------------------------------------
+void CProp_Portal::UpdatePortalDetectorsOnPortalMoved( void )
+{
+	for ( CFuncPortalDetector *pDetector = GetPortalDetectorList(); pDetector != NULL; pDetector = pDetector->m_pNext )
+	{
+		pDetector->UpdateOnPortalMoved( this );
+	}
+}
+
+void CProp_Portal::UpdatePortalDetectorsOnPortalActivated( void )
+{
+	for ( CFuncPortalDetector *pDetector = GetPortalDetectorList(); pDetector != NULL; pDetector = pDetector->m_pNext )
+	{
+		pDetector->UpdateOnPortalActivated( this );
+	}
+}
+#endif
 void CProp_Portal::UpdatePortalLinkage( void )
 {
 	if( m_bActivated )
@@ -1882,6 +1964,10 @@ void CProp_Portal::UpdatePortalLinkage( void )
 			// Initialize mics/speakers
 			if( m_hMicrophone == 0 )
 			{
+				if ( !ShouldCreateMicrophones() )
+				{
+					goto SKIP_MICROPHONES;
+				}
 				inputdata_t inputdata;
 
 				m_hMicrophone = CreateEntityByName( "env_microphone" );
@@ -1900,6 +1986,7 @@ void CProp_Portal::UpdatePortalLinkage( void )
 					pMicrophone->Activate();
 					pMicrophone->SetSpeakerName( MAKE_STRING( "PortalSpeaker2" ) );
 					pMicrophone->SetSensitivity( 10.0f );
+					pMicrophone->SetOwnerEntity( this );
 				}
 				else
 				{
@@ -1908,11 +1995,16 @@ void CProp_Portal::UpdatePortalLinkage( void )
 					pMicrophone->Activate();
 					pMicrophone->SetSpeakerName( MAKE_STRING( "PortalSpeaker1" ) );
 					pMicrophone->SetSensitivity( 10.0f );
+					pMicrophone->SetOwnerEntity( this );
 				}
 			}
 
 			if ( m_hLinkedPortal->m_hMicrophone == 0 )
 			{
+				if ( !ShouldCreateMicrophones() )
+				{
+					goto SKIP_MICROPHONES;
+				}
 				inputdata_t inputdata;
 
 				m_hLinkedPortal->m_hMicrophone = CreateEntityByName( "env_microphone" );
@@ -1931,6 +2023,7 @@ void CProp_Portal::UpdatePortalLinkage( void )
 					pLinkedMicrophone->Activate();
 					pLinkedMicrophone->SetSpeakerName( MAKE_STRING( "PortalSpeaker1" ) );
 					pLinkedMicrophone->SetSensitivity( 10.0f );
+					pLinkedMicrophone->SetOwnerEntity( this );
 				}
 				else
 				{
@@ -1939,22 +2032,21 @@ void CProp_Portal::UpdatePortalLinkage( void )
 					pLinkedMicrophone->Activate();
 					pLinkedMicrophone->SetSpeakerName( MAKE_STRING( "PortalSpeaker2" ) );
 					pLinkedMicrophone->SetSensitivity( 10.0f );
+					pLinkedMicrophone->SetOwnerEntity( this );
 				}
 			}
 
 			// Set microphone/speaker positions
-			Vector vZero( 0.0f, 0.0f, 0.0f );
-
 			CEnvMicrophone *pMicrophone = static_cast<CEnvMicrophone*>( m_hMicrophone.Get() );
 			pMicrophone->AddSpawnFlags( SF_MICROPHONE_IGNORE_NONATTENUATED );
-			pMicrophone->Teleport( &GetAbsOrigin(), &GetAbsAngles(), &vZero );
-			inputdata_t in;
-			pMicrophone->InputEnable( in );
+			pMicrophone->Teleport( &GetAbsOrigin(), &GetAbsAngles(), &vec3_origin );
+			pMicrophone->InputEnable( inputdata_t() );
 
 			CSpeaker *pSpeaker = static_cast<CSpeaker*>( m_hSpeaker.Get() );
-			pSpeaker->Teleport( &GetAbsOrigin(), &GetAbsAngles(), &vZero );
-			pSpeaker->InputTurnOn( in );
-
+			pSpeaker->Teleport( &GetAbsOrigin(), &GetAbsAngles(), &vec3_origin );
+			pSpeaker->InputTurnOn( inputdata_t() );
+//#pragma warning (disable:4533)
+			SKIP_MICROPHONES:
 			UpdatePortalTeleportMatrix();
 		}
 		else
@@ -2071,6 +2163,8 @@ void CProp_Portal::NewLocation( const Vector &vOrigin, const QAngle &qAngles )
 
 	WakeNearbyEntities();
 
+	m_qLastPortalAngles = GetAbsAngles();
+
 	Teleport( &vOrigin, &qAngles, 0 );
 
 	if ( m_hMicrophone )
@@ -2090,7 +2184,15 @@ void CProp_Portal::NewLocation( const Vector &vOrigin, const QAngle &qAngles )
 	}
 
 	CreateSounds();
-
+#if 0
+	UpdatePortalDetectorsOnPortalMoved();
+	if( (m_hLinkedPortal.Get() != NULL) && (!m_bActivated == false) )
+	{
+		//went from inactive to active
+		UpdatePortalDetectorsOnPortalActivated();
+		((CProp_Portal *)m_hLinkedPortal.Get())->UpdatePortalDetectorsOnPortalActivated();
+	}
+#endif
 	if ( m_pAmbientSound )
 	{
 		CSoundEnvelopeController &controller = CSoundEnvelopeController::GetController();
@@ -2104,6 +2206,11 @@ void CProp_Portal::NewLocation( const Vector &vOrigin, const QAngle &qAngles )
 	bool bOtherShouldBeStatic = false;
 	if( !m_hLinkedPortal )
 		bOtherShouldBeStatic = true;
+	
+	if ( m_bActivated )
+	{
+		BroadcastPortalEvent( PORTALEVENT_MOVED );
+	}
 
 	m_bActivated = true;
 
@@ -2258,8 +2365,57 @@ void CProp_Portal::UpdateCorners()
 	}
 }
 
+//-----------------------------------------------------------------------------
+// Purpose: Tell all listeners about an event that just occurred 
+//-----------------------------------------------------------------------------
+void CProp_Portal::BroadcastPortalEvent( PortalEvent_t nEventType )
+{
+	/*
+	switch( nEventType )
+	{
+	case PORTALEVENT_MOVED:
+		Msg("[ Portal moved ]\n");
+		break;
+	
+	case PORTALEVENT_FIZZLE:
+		Msg("[ Portal fizzled ]\n");
+		break;
+	
+	case PORTALEVENT_LINKED:
+		Msg("[ Portal linked ]\n");
+		break;
+	}
+	*/
 
+	// We need to walk the list backwards because callers can remove themselves from our list as they're notified
+	for ( int i = m_PortalEventListeners.Count()-1; i >= 0; i-- )
+	{
+		if ( m_PortalEventListeners[i] == NULL )
+			continue;
 
+		m_PortalEventListeners[i]->NotifyPortalEvent( nEventType, this );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Add a listener to our collection
+//-----------------------------------------------------------------------------
+void CProp_Portal::AddPortalEventListener( EHANDLE hListener )
+{
+	// Don't multiply add
+	if ( m_PortalEventListeners.Find( hListener ) != m_PortalEventListeners.InvalidIndex() )
+		return;
+
+	m_PortalEventListeners.AddToTail( hListener );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Remove a listener to our collection
+//-----------------------------------------------------------------------------
+void CProp_Portal::RemovePortalEventListener( EHANDLE hListener )
+{
+	m_PortalEventListeners.FindAndFastRemove( hListener );
+}
 
 void CProp_Portal::ChangeLinkageGroup( unsigned char iLinkageGroupID )
 {

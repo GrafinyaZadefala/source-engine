@@ -104,7 +104,6 @@ static CPhysCollide *ConvertPolyhedronsToCollideable( CPolyhedron **pPolyhedrons
 
 #ifndef CLIENT_DLL
 static void UpdateShadowClonesPortalSimulationFlags( const CBaseEntity *pSourceEntity, unsigned int iFlags, int iSourceFlags );
-static bool g_bPlayerIsInSimulator = false;
 #endif
 
 static CUtlVector<CPortalSimulator *> s_PortalSimulators;
@@ -132,7 +131,7 @@ CPortalSimulator::CPortalSimulator( void )
 	s_PortalSimulators.AddToTail( this );
 
 #ifdef CLIENT_DLL
-	m_bGenerateCollision = (GameRules() && GameRules()->IsMultiplayer());
+	m_bGenerateCollision = gpGlobals->maxClients != 1;
 #endif
 
 	m_CreationChecklist.bPolyhedronsGenerated = false;
@@ -461,7 +460,7 @@ bool CPortalSimulator::EntityIsInPortalHole( CBaseEntity *pEntity ) const
 			}
 			break;
 		}
-
+		
 	case SOLID_BBOX:
 		{
 			Vector ptEntityPosition = pEntity->GetAbsOrigin();
@@ -492,6 +491,15 @@ bool CPortalSimulator::EntityIsInPortalHole( CBaseEntity *pEntity ) const
 #endif
 
 		return false;
+	case SOLID_CUSTOM:
+		{
+			Vector vMins, vMaxs;
+			Vector ptCenter = pEntity->CollisionProp()->GetCollisionOrigin();
+			pEntity->ComputeWorldSpaceSurroundingBox( &vMins, &vMaxs );
+			physcollision->TraceBox( ptCenter, ptCenter, vMins, vMaxs, m_InternalData.Placement.pHoleShapeCollideable, vec3_origin, vec3_angle, &Trace );
+
+		}
+		break;
 
 	default:
 		Assert( false ); //make a handler
@@ -1093,11 +1101,6 @@ void CPortalSimulator::MarkAsOwned( CBaseEntity *pEntity )
 	m_InternalData.Simulation.Dynamic.EntFlags[iEntIndex] |= PSEF_OWNS_ENTITY;
 	s_OwnedEntityMap[iEntIndex] = this;
 	m_InternalData.Simulation.Dynamic.OwnedEntities.AddToTail( pEntity );
-
-	if ( pEntity->IsPlayer() )
-	{
-		g_bPlayerIsInSimulator = true;
-	}
 }
 
 void CPortalSimulator::MarkAsReleased( CBaseEntity *pEntity )
@@ -1119,12 +1122,6 @@ void CPortalSimulator::MarkAsReleased( CBaseEntity *pEntity )
 		}
 	}
 	Assert( i >= 0 );
-
-
-	if ( pEntity->IsPlayer() )
-	{
-		g_bPlayerIsInSimulator = false;
-	}
 }
 
 
@@ -2437,19 +2434,22 @@ void CPortalSimulator::PrePhysFrame( void )
 
 void CPortalSimulator::PostPhysFrame( void )
 {
-	if ( g_bPlayerIsInSimulator )
+	for( int i = 1; i <= gpGlobals->maxClients; ++i )
 	{
-		CPortal_Player* pPlayer = dynamic_cast<CPortal_Player*>( UTIL_GetLocalPlayer() );
-		CProp_Portal* pTouchedPortal = pPlayer->m_hPortalEnvironment.Get();
-		CPortalSimulator* pSim = GetSimulatorThatOwnsEntity( pPlayer );
-		if ( pTouchedPortal && pSim && (pTouchedPortal->m_PortalSimulator.GetPortalSimulatorGUID() != pSim->GetPortalSimulatorGUID()) )
+		CPortal_Player* pPlayer = (CPortal_Player *)UTIL_PlayerByIndex( i );
+		if( pPlayer )
 		{
-			Warning ( "Player is simulated in a physics environment but isn't touching a portal! Can't teleport, but can fall through portal hole. Returning player to main environment.\n" );
-			ADD_DEBUG_HISTORY( HISTORY_PLAYER_DAMAGE, UTIL_VarArgs( "Player in PortalSimulator but not touching a portal, removing from sim at : %f\n",  gpGlobals->curtime ) );
-			
-			if ( pSim )
+			CProp_Portal* pTouchedPortal = pPlayer->m_hPortalEnvironment.Get();
+			CPortalSimulator* pSim = GetSimulatorThatOwnsEntity( pPlayer );
+			if ( pTouchedPortal && pSim && (pTouchedPortal->m_PortalSimulator.GetPortalSimulatorGUID() != pSim->GetPortalSimulatorGUID()) )
 			{
-				pSim->ReleaseOwnershipOfEntity( pPlayer, false );
+				Warning ( "Player is simulated in a physics environment but isn't touching a portal! Can't teleport, but can fall through portal hole. Returning player to main environment.\n" );
+				ADD_DEBUG_HISTORY( HISTORY_PLAYER_DAMAGE, UTIL_VarArgs( "Player in PortalSimulator but not touching a portal, removing from sim at : %f\n",  gpGlobals->curtime ) );
+				
+				if ( pSim )
+				{
+					pSim->ReleaseOwnershipOfEntity( pPlayer, false );
+				}
 			}
 		}
 	}
@@ -2486,9 +2486,10 @@ int CPortalSimulator::GetMoveableOwnedEntities( CBaseEntity **pEntsOut, int iEnt
 
 	return iOutputCount;
 }
-
+#endif
 CPortalSimulator *CPortalSimulator::GetSimulatorThatOwnsEntity( const CBaseEntity *pEntity )
 {
+#ifdef GAME_DLL
 #ifdef _DEBUG
 	int iEntIndex = pEntity->entindex();
 	CPortalSimulator *pOwningSimulatorCheck = NULL;
@@ -2504,10 +2505,10 @@ CPortalSimulator *CPortalSimulator::GetSimulatorThatOwnsEntity( const CBaseEntit
 
 	AssertMsg( pOwningSimulatorCheck == s_OwnedEntityMap[iEntIndex], "Owned entity mapping out of sync with individual simulator ownership flags." );
 #endif
-
+#endif
 	return s_OwnedEntityMap[pEntity->entindex()];
 }
-
+#ifndef CLIENT_DLL
 CPortalSimulator *CPortalSimulator::GetSimulatorThatCreatedPhysicsObject( const IPhysicsObject *pObject, PS_PhysicsObjectSourceType_t *pOut_SourceType )
 {
 	for( int i = s_PortalSimulators.Count(); --i >= 0; )
@@ -2893,8 +2894,7 @@ void CPSCollisionEntity::Spawn( void )
 	s_PortalSimulatorCollisionEntities[entindex()] = true;
 	VPhysicsSetObject( NULL );
 	AddFlag( FL_WORLDBRUSH );
-	AddEffects( EF_NODRAW | EF_NOSHADOW | EF_NORECEIVESHADOW );
-	IncrementInterpolationFrame();
+	AddEFlags( EF_NODRAW | EF_NOINTERP | EF_NOSHADOW | EF_NORECEIVESHADOW );
 }
 
 void CPSCollisionEntity::Activate( void )

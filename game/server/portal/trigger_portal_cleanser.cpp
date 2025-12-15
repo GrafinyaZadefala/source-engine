@@ -17,6 +17,8 @@
 #include "portal/weapon_physcannon.h"
 #include "model_types.h"
 #include "rumble_shared.h"
+#include "trigger_portal_cleanser.h"
+#include "prop_weighted_cube.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -30,27 +32,8 @@ static char *g_pszPortalNonCleansable[] =
 	"env_ghostanimating",
 	"physicsshadowclone",
 	"prop_energy_ball",
+	"prop_paint_bomb",
 	NULL,
-};
-
-//-----------------------------------------------------------------------------
-// Purpose: Removes anything that touches it. If the trigger has a targetname,
-//			firing it will toggle state.
-//-----------------------------------------------------------------------------
-class CTriggerPortalCleanser : public CBaseTrigger
-{
-public:
-	DECLARE_CLASS( CTriggerPortalCleanser, CBaseTrigger );
-
-	void Spawn( void );
-	void Touch( CBaseEntity *pOther );
-
-	DECLARE_DATADESC();
-
-	// Outputs
-	COutputEvent m_OnDissolve;
-	COutputEvent m_OnFizzle;
-	COutputEvent m_OnDissolveBox;
 };
 
 BEGIN_DATADESC( CTriggerPortalCleanser )
@@ -178,9 +161,14 @@ void CTriggerPortalCleanser::Touch( CBaseEntity *pOther )
 
 		return;
 	}
+	
+	CBaseAnimating *pBaseAnimating = pOther->GetBaseAnimating();
 
-	CBaseAnimating *pBaseAnimating = dynamic_cast<CBaseAnimating*>( pOther );
+	CTriggerPortalCleanser::FizzleBaseAnimating( this, pBaseAnimating );
+}
 
+void CTriggerPortalCleanser::FizzleBaseAnimating( CTriggerPortalCleanser *pFizzler, CBaseAnimating *pBaseAnimating )
+{
 	if ( pBaseAnimating && !pBaseAnimating->IsDissolving() )
 	{
 		int i = 0;
@@ -198,9 +186,9 @@ void CTriggerPortalCleanser::Touch( CBaseEntity *pOther )
 
 		// The portal weight box, used for puzzles in the portal mod is differentiated by its name
 		// always being 'box'. We use special logic when the cleanser dissolves a box so this is a special output for it.
-		if ( pBaseAnimating->NameMatches( "box" ) )
+		if ( pFizzler && pBaseAnimating->NameMatches( "box" ) )
 		{
-			m_OnDissolveBox.FireOutput( pOther, this );
+			pFizzler->m_OnDissolveBox.FireOutput( pBaseAnimating, pFizzler );
 		}
 
 		if ( FClassnameIs( pBaseAnimating, "updateitem2" ) )
@@ -227,12 +215,18 @@ void CTriggerPortalCleanser::Touch( CBaseEntity *pOther )
 			}
 		}
 
+		CPropWeightedCube *pCube = dynamic_cast<CPropWeightedCube*>( pBaseAnimating );
+		if ( pCube )
+		{
+			pCube->m_OnFizzled.FireOutput( pCube, pCube );
+		}
+
 		// Swap object with an disolving physics model to avoid touch logic
 		CBaseEntity *pDisolvingObj = ConvertToSimpleProp( pBaseAnimating );
 		if ( pDisolvingObj )
 		{
 			// Remove old prop, transfer name and children to the new simple prop
-			pDisolvingObj->SetName( pBaseAnimating->GetEntityName() );
+			//pDisolvingObj->SetName( pBaseAnimating->GetEntityName() );
 			UTIL_TransferPoseParameters( pBaseAnimating, pDisolvingObj );
 			TransferChildren( pBaseAnimating, pDisolvingObj );
 			pDisolvingObj->SetCollisionGroup( COLLISION_GROUP_INTERACTIVE_DEBRIS );
@@ -264,6 +258,7 @@ void CTriggerPortalCleanser::Touch( CBaseEntity *pOther )
 			pDisolvingAnimating->Dissolve( "", gpGlobals->curtime, false, ENTITY_DISSOLVE_NORMAL );
 		}
 
-		m_OnDissolve.FireOutput( pOther, this );
+		if ( pFizzler )
+			pFizzler->m_OnDissolve.FireOutput( pBaseAnimating, pFizzler );
 	}
 }

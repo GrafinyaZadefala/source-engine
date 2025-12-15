@@ -12,6 +12,7 @@
 #include "portal_collideable_enumerator.h"
 #include "prop_portal_shared.h"
 #include "rumble_shared.h"
+#include "hl2_shareddefs.h"
 
 #if defined( CLIENT_DLL )
 	#include "c_portal_player.h"
@@ -30,6 +31,9 @@
 
 ConVar sv_player_trace_through_portals("sv_player_trace_through_portals", "1", FCVAR_REPLICATED | FCVAR_CHEAT, "Causes player movement traces to trace through portals." );
 ConVar sv_player_funnel_into_portals("sv_player_funnel_into_portals", "1", FCVAR_REPLICATED | FCVAR_ARCHIVE | FCVAR_ARCHIVE_XBOX, "Causes the player to auto correct toward the center of floor portals." ); 
+
+ConVar sv_speed_paint_max("sv_speed_paint_max", "800.0f", FCVAR_REPLICATED | FCVAR_CHEAT, "For tweaking the max speed for speed paint.");
+ConVar sv_speed_paint_side_move_factor("sv_speed_paint_side_move_factor", "0.5f", FCVAR_REPLICATED | FCVAR_CHEAT);
 
 class CReservePlayerSpot;
 
@@ -79,6 +83,8 @@ public:
 	virtual void PlayerRoughLandingEffects( float fvol );
 
 	virtual void CategorizePosition( void );
+	
+	virtual void CheckParameters( void );
 
 	// Traces the player bbox as it is swept from start to end
 	virtual void TracePlayerBBox( const Vector& start, const Vector& end, unsigned int fMask, int collisionGroup, trace_t& pm );
@@ -92,8 +98,12 @@ public:
 
 	virtual void SetGroundEntity( trace_t *pm );
 
-private:
+	// Handle MOVETYPE_WALK.
+	virtual void	FullWalkMove();
 
+private:
+	
+	virtual void	TBeamMove();
 
 	CPortal_Player	*GetPortalPlayer();
 };
@@ -142,6 +152,34 @@ void CPortalGameMovement::ProcessMovement( CBasePlayer *pPlayer, CMoveData *pMov
 
 	g_bAllowForcePortalTrace = m_bInPortalEnv;
 	g_bForcePortalTrace = m_bInPortalEnv;
+
+	Vector vForward, vRight;
+	AngleVectors( mv->m_vecViewAngles, &vForward, &vRight, NULL );  // Determine movement angles
+
+	const Vector worldUp( 0, 0, 1 );
+	bool shouldProjectInputVectorsOntoGround = pPlayer->GetGroundEntity() != NULL;
+
+	if( shouldProjectInputVectorsOntoGround )
+	{
+		vForward -= DotProduct( vForward, worldUp ) * worldUp;
+		vRight -= DotProduct( vRight, worldUp ) * worldUp;
+
+		vForward.NormalizeInPlace();
+		vRight.NormalizeInPlace();
+	}
+	
+	Vector vWishVel = vForward*mv->m_flForwardMove + vRight*mv->m_flSideMove;
+	vWishVel -= worldUp * DotProduct( vWishVel, worldUp );
+	
+	GetPortalPlayer()->SetInputVector( vWishVel );
+	GetPortalPlayer()->UpdatePaintPowers();
+
+	// Using the paint power may change the velocity
+	mv->m_vecVelocity = player->GetAbsVelocity();
+	
+	// Use this player's max speed (dependent on whether he's on speed paint)
+	const float maxSpeed = pPlayer->MaxSpeed();
+	mv->m_flClientMaxSpeed = mv->m_flMaxSpeed = maxSpeed;
 
 	// Run the command.
 	PlayerMove();
@@ -280,6 +318,28 @@ void CPortalGameMovement::AirAccelerate( Vector& wishdir, float wishspeed, float
 		mv->m_vecVelocity[i] += accelspeed * wishdir[i];
 		mv->m_outWishVel[i] += accelspeed * wishdir[i];
 	}
+}
+
+void CPortalGameMovement::TBeamMove( void )
+{
+	CPortal_Player *pPortalPlayer = GetPortalPlayer();
+
+	CTrigger_TractorBeam *pTractorBeam = pPortalPlayer->GetTractorBeam();
+	if ( !pTractorBeam )
+		return;
+
+	if ( gpGlobals->frametime > 0.0f )
+	{
+		Vector vLinear;
+		AngularImpulse angAngular;
+		vLinear.Init();
+		angAngular.Init();
+
+		pTractorBeam->CalculateFrameMovement( NULL, pPortalPlayer, gpGlobals->frametime, vLinear, angAngular );
+		mv->m_vecVelocity += vLinear * gpGlobals->frametime;
+	}
+
+	TryPlayerMove( 0, 0 );
 }
 
 //-----------------------------------------------------------------------------
@@ -496,9 +556,12 @@ void CPortalGameMovement::CategorizePosition( void )
 	Vector point;
 	trace_t pm;
 
+	// Reset this each time we-recategorize, otherwise we have bogus friction when we jump into water and plunge downward really quickly
+	player->m_surfaceFriction = 1.0f;
+
 	// if the player hull point one unit down is solid, the player
 	// is on ground
-
+	
 	// see if standing on something solid	
 
 	// Doing this before we move may introduce a potential latency in water detection, but
@@ -512,9 +575,11 @@ void CPortalGameMovement::CategorizePosition( void )
 	if ( player->IsObserver() )
 		return;
 
+	float flOffset = 2.0f;
+
 	point[0] = mv->GetAbsOrigin()[0];
 	point[1] = mv->GetAbsOrigin()[1];
-	point[2] = mv->GetAbsOrigin()[2] - 2;
+	point[2] = mv->GetAbsOrigin()[2] - flOffset;
 
 	Vector bumpOrigin;
 	bumpOrigin = mv->GetAbsOrigin();
@@ -522,61 +587,109 @@ void CPortalGameMovement::CategorizePosition( void )
 	// Shooting up really fast.  Definitely not on ground.
 	// On ladder moving up, so not on ground either
 	// NOTE: 145 is a jump.
-	if ( mv->m_vecVelocity[2] > 140 || 
-		( mv->m_vecVelocity[2] > 0.0f && player->GetMoveType() == MOVETYPE_LADDER ) )   
+#define NON_JUMP_VELOCITY 140.0f
+
+	float zvel = mv->m_vecVelocity[2];
+	bool bMovingUp = zvel > 0.0f;
+	bool bMovingUpRapidly = zvel > NON_JUMP_VELOCITY && ((player->GetGroundEntity() == NULL) || IsInactivePower( GetPortalPlayer()->GetPaintPower( SPEED_POWER )));
+	float flGroundEntityVelZ = 0.0f;
+	if ( bMovingUpRapidly )
+	{
+		// Tracker 73219, 75878:  ywb 8/2/07
+		// After save/restore (and maybe at other times), we can get a case where we were saved on a lift and 
+		//  after restore we'll have a high local velocity due to the lift making our abs velocity appear high.  
+		// We need to account for standing on a moving ground object in that case in order to determine if we really 
+		//  are moving away from the object we are standing on at too rapid a speed.  Note that CheckJump already sets
+		//  ground entity to NULL, so this wouldn't have any effect unless we are moving up rapidly not from the jump button.
+		CBaseEntity *ground = player->GetGroundEntity();
+		if ( ground )
+		{
+			flGroundEntityVelZ = ground->GetAbsVelocity().z;
+			bMovingUpRapidly = ( zvel - flGroundEntityVelZ ) > NON_JUMP_VELOCITY;
+		}
+	}
+
+	// NOTE YWB 7/5/07:  Since we're already doing a traceline here, we'll subsume the StayOnGround (stair debouncing) check into the main traceline we do here to see what we're standing on
+	bool bUnderwater = ( player->GetWaterLevel() >= WL_Eyes );
+	bool bMoveToEndPos = false;
+	if ( player->GetMoveType() == MOVETYPE_WALK && 
+		player->GetGroundEntity() != NULL && !bUnderwater )
+	{
+		// if walking and still think we're on ground, we'll extend trace down by stepsize so we don't bounce down slopes
+		bMoveToEndPos = true;
+		point.z -= player->m_Local.m_flStepSize;
+	}
+
+	// Was on ground, but now suddenly am not
+	if ( bMovingUpRapidly || 
+		( bMovingUp && player->GetMoveType() == MOVETYPE_LADDER ) )   
 	{
 		SetGroundEntity( NULL );
+		bMoveToEndPos = false;
 	}
 	else
 	{
 		// Try and move down.
-		TracePlayerBBox( bumpOrigin, point, MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+		TracePlayerBBox( bumpOrigin, point, PlayerSolidMask(), COLLISION_GROUP_PLAYER_MOVEMENT, pm );
 
-		// If we hit a steep plane, we are not on ground
-		if ( pm.plane.normal[2] < 0.7)
+		const Vector vPrevGroundNormal = GetPortalPlayer()->GetPrevGroundNormal();
+
+		float fDot = DotProduct( vPrevGroundNormal, pm.plane.normal );
+		float fSpeed = mv->m_vecVelocity.Length();
+		bool bRampLaunch = false;
+
+		// Fast enough to launch and surface slopes have a sharp enough change?
+		if( GetPortalPlayer()->GetGroundEntity() &&		// We're on the ground this frame
+			fSpeed > sv_maxspeed.GetFloat() &&	// Our speed is greater than the normal (ie. we're on speed paint)
+			( fDot < 1.f ||	!pm.DidHit() )	)	// And the trace did not hit or there was a significant change in surface normals
 		{
-			// Test four sub-boxes, to see if any of them would have found shallower slope we could
-			// actually stand on
 
-			TracePlayerBBoxForGround2( bumpOrigin, point, GetPlayerMins(), GetPlayerMaxs(), mv->m_nPlayerHandle.Get(), MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
-			if ( pm.plane.normal[2] < 0.7)
+			// Find out if the slope went up or down
+			Vector vVelCrossUp = CrossProduct( mv->m_vecVelocity.Normalized(), Vector(0,0,1) );
+			Vector vNewNormCrossOldNorm = CrossProduct( pm.plane.normal, vPrevGroundNormal );
+			float fCrossDot = DotProduct( vVelCrossUp, vNewNormCrossOldNorm );
+			// If it was a downward change then launch off of it
+			if( fCrossDot > EQUAL_EPSILON || ( vPrevGroundNormal.Length2DSqr() && !pm.DidHit() ) )
 			{
+				bRampLaunch = true;
 
-				SetGroundEntity( NULL );	// too steep
+				// Compute normalized forward direction in tangent plane of the ramp
+				const Vector vWishDirection = mv->m_vecVelocity;
+				const Vector vTangentRight = CrossProduct( vWishDirection, vPrevGroundNormal );
+				const Vector vNormTangentForward = CrossProduct( vPrevGroundNormal, vTangentRight ).Normalized();
+
+				mv->m_vecVelocity = vNormTangentForward * mv->m_vecVelocity.Length();
+			}
+		}
+
+		// Was on ground, but now suddenly am not.  If we hit a steep plane, we are not on ground
+		float flStandableZ = 0.7;
+
+
+
+		if ( !pm.m_pEnt || ( pm.plane.normal[2] < flStandableZ ) || bRampLaunch )
+		{
+			// Test four sub-boxes, to see if any of them would have found shallower slope we could actually stand on
+			TracePlayerBBoxForGround2( bumpOrigin, point, GetPlayerMins(), GetPlayerMaxs(), mv->m_nPlayerHandle.Get(), MASK_PLAYERSOLID, COLLISION_GROUP_PLAYER_MOVEMENT, pm );
+			if ( !pm.m_pEnt || ( pm.plane.normal[2] < flStandableZ ) || bRampLaunch )
+			{
+				SetGroundEntity( NULL );
 				// probably want to add a check for a +z velocity too!
-				if ( ( mv->m_vecVelocity.z > 0.0f ) && ( player->GetMoveType() != MOVETYPE_NOCLIP ) )
+				if ( ( mv->m_vecVelocity.z > 0.0f ) && 
+					( player->GetMoveType() != MOVETYPE_NOCLIP ) )
 				{
 					player->m_surfaceFriction = 0.25f;
 				}
+				bMoveToEndPos = false;
 			}
 			else
 			{
-				SetGroundEntity( &pm );  // Otherwise, point to index of ent under us.
+				SetGroundEntity( &pm );
 			}
 		}
 		else
 		{
 			SetGroundEntity( &pm );  // Otherwise, point to index of ent under us.
-		}
-
-		// If we are on something...
-		if (player->GetGroundEntity() != NULL)
-		{
-			// Then we are not in water jump sequence
-			player->m_flWaterJumpTime = 0;
-
-			// If we could make the move, drop us down that 1 pixel
-			if ( player->GetWaterLevel() < WL_Waist && !pm.startsolid && !pm.allsolid )
-			{
-				// check distance we would like to move -- this is supposed to just keep up
-				// "on the ground" surface not stap us back to earth (i.e. on move origin to
-				// end position when the ground is within .5 units away) (2 units)
-				if( pm.fraction )
-					//				if( pm.fraction < 0.5)
-				{
-					mv->SetAbsOrigin( pm.endpos );
-				}
-			}
 		}
 
 #ifndef CLIENT_DLL
@@ -602,6 +715,165 @@ void CPortalGameMovement::CategorizePosition( void )
 			player->m_chPreviousTextureType = cCurrGameMaterial;
 		}
 #endif
+	}
+
+	// YWB:  This logic block essentially lifted from StayOnGround implementation
+	if ( bMoveToEndPos &&
+		!pm.startsolid &&				// not sure we need this check as fraction would == 0.0f?
+		pm.fraction > 0.0f &&			// must go somewhere
+		pm.fraction < 1.0f ) 			// must hit something
+	{
+		mv->SetAbsOrigin( pm.endpos );
+	}
+	
+	// Save the normal of the surface if we hit something
+	if( GetPortalPlayer()->GetGroundEntity() != NULL && pm.DidHit() )
+	{
+		GetPortalPlayer()->SetPrevGroundNormal( pm.plane.normal );
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CPortalGameMovement::CheckParameters( void )
+{
+	QAngle	v_angle;
+
+	if ( player->GetMoveType() != MOVETYPE_ISOMETRIC &&
+		 player->GetMoveType() != MOVETYPE_NOCLIP &&
+		 player->GetMoveType() != MOVETYPE_OBSERVER )
+	{
+		float spd;
+		float maxspeed;
+
+		bool bIsOnSpeedPaint =  GetPortalPlayer()->GetPaintPower( SPEED_POWER ).m_State != INACTIVE_PAINT_POWER; //mv->m_flMaxSpeed > 150; // HACK: HL2_WALK_SPEED
+
+		spd = ( mv->m_flForwardMove * mv->m_flForwardMove ) +
+			  ( mv->m_flSideMove * mv->m_flSideMove ) +
+			  ( mv->m_flUpMove * mv->m_flUpMove );
+
+		maxspeed = mv->m_flClientMaxSpeed;
+		if ( maxspeed != 0.0 )
+		{
+			mv->m_flMaxSpeed = MIN( maxspeed, mv->m_flMaxSpeed );
+		}
+
+		// Slow down by the speed factor
+		float flSpeedFactor = 1.0f;
+		if (player->m_pSurfaceData)
+		{
+			flSpeedFactor = player->m_pSurfaceData->game.maxSpeedFactor;
+		}
+
+		// If we have a constraint, slow down because of that too.
+		float flConstraintSpeedFactor = ComputeConstraintSpeedFactor();
+		if (flConstraintSpeedFactor < flSpeedFactor)
+			flSpeedFactor = flConstraintSpeedFactor;
+
+		mv->m_flMaxSpeed *= flSpeedFactor;
+
+		float flSideMoveFactor = 1.0f;
+		float flForwardMoveFactor = 1.0f;
+
+		//If the player is on speed paint and pressing both a forward/backward and left/right movement keys
+		if( bIsOnSpeedPaint && player->GetGroundEntity() &&
+			mv->m_flForwardMove != 0.f && mv->m_flSideMove != 0.f )
+		{
+			const float flForwardSpeed = fabs( DotProduct( player->Forward(), mv->m_vecVelocity ) );
+			const float flSideSpeed = fabs( DotProduct( player->Left(), mv->m_vecVelocity ) );
+
+			// Figure out which direction we're more moving in: Side to side or forward/backward. then dampen our
+			// input in the direction we're not mostly traveling
+			if( flForwardSpeed > flSideSpeed )
+			{
+				flSideMoveFactor = sv_speed_paint_side_move_factor.GetFloat();
+			}
+			else
+			{
+				flForwardMoveFactor = sv_speed_paint_side_move_factor.GetFloat();
+			}
+		}
+
+		// Go faster on speed paint
+		if( bIsOnSpeedPaint )
+		{
+			float flSpeedPaintMultiplier = mv->m_flMaxSpeed / 150; // HACK: HL2_WALK_SPEED
+			mv->m_flForwardMove *= flSpeedPaintMultiplier;
+			mv->m_flSideMove    *= flSpeedPaintMultiplier;
+			mv->m_flUpMove      *= flSpeedPaintMultiplier; // do we need this?
+		}
+
+		extern bool g_bMovementOptimizations;
+		if ( g_bMovementOptimizations )
+		{
+			// Same thing but only do the sqrt if we have to.
+			if ( ( spd != 0.0 ) && ( spd > mv->m_flMaxSpeed*mv->m_flMaxSpeed ) )
+			{
+				float fRatio = mv->m_flMaxSpeed / sqrt( spd );
+				mv->m_flForwardMove *= fRatio;
+				mv->m_flSideMove    *= fRatio;
+				mv->m_flUpMove      *= fRatio;
+			}
+		}
+		else
+		{
+			spd = sqrt( spd );
+			if ( ( spd != 0.0 ) && ( spd > mv->m_flMaxSpeed ) )
+			{
+				float fRatio = mv->m_flMaxSpeed / spd;
+				mv->m_flForwardMove *= fRatio;
+				mv->m_flSideMove    *= fRatio;
+				mv->m_flUpMove      *= fRatio;
+			}
+		}
+	}
+
+	if ( player->GetFlags() & FL_FROZEN ||
+		 player->GetFlags() & FL_ONTRAIN || 
+		 IsDead() )
+	{
+		mv->m_flForwardMove = 0;
+		mv->m_flSideMove    = 0;
+		mv->m_flUpMove      = 0;
+	}
+
+	DecayPunchAngle();
+
+	// Take angles from command.
+	if ( !IsDead() )
+	{
+		v_angle = mv->m_vecAngles;
+		v_angle = v_angle + player->m_Local.m_vecPunchAngle;
+
+		// Now adjust roll angle
+		if ( player->GetMoveType() != MOVETYPE_ISOMETRIC  &&
+			 player->GetMoveType() != MOVETYPE_NOCLIP )
+		{
+			mv->m_vecAngles[ROLL]  = CalcRoll( v_angle, mv->m_vecVelocity, sv_rollangle.GetFloat(), sv_rollspeed.GetFloat() );
+		}
+		else
+		{
+			mv->m_vecAngles[ROLL] = 0.0; // v_angle[ ROLL ];
+		}
+		mv->m_vecAngles[PITCH] = v_angle[PITCH];
+		mv->m_vecAngles[YAW]   = v_angle[YAW];
+	}
+	else
+	{
+		mv->m_vecAngles = mv->m_vecOldAngles;
+	}
+
+	// Set dead player view_offset
+	if ( IsDead() )
+	{
+		player->SetViewOffset( VEC_DEAD_VIEWHEIGHT_SCALED( player ) );
+	}
+
+	// Adjust client view angles to match values used on server.
+	if ( mv->m_vecAngles[YAW] > 180.0f )
+	{
+		mv->m_vecAngles[YAW] -= 360.0f;
 	}
 }
 
@@ -675,10 +947,79 @@ void CPortalGameMovement::SetGroundEntity( trace_t *pm )
 		}
 	}
 #endif
+	
+	CBaseEntity *newGround = pm ? pm->m_pEnt : NULL;
 
-	BaseClass::SetGroundEntity( pm );
+	//Adrian: Special case for combine balls.
+	if ( newGround && newGround->GetCollisionGroup() == HL2COLLISION_GROUP_COMBINE_BALL_NPC )
+	{
+		return;
+	}
+
+	CBaseEntity *oldGround = player->GetGroundEntity();
+	Vector vecBaseVelocity = player->GetBaseVelocity();
+
+	if ( !oldGround && newGround )
+	{
+		// Subtract ground velocity at instant we hit ground jumping
+		vecBaseVelocity -= newGround->GetAbsVelocity(); 
+		vecBaseVelocity.z = newGround->GetAbsVelocity().z;
+	}
+	else if ( oldGround && !newGround )
+	{
+		// Add in ground velocity at instant we started jumping
+ 		vecBaseVelocity += oldGround->GetAbsVelocity();
+		vecBaseVelocity.z = oldGround->GetAbsVelocity().z;
+	}
+
+	player->SetBaseVelocity( vecBaseVelocity );
+	player->SetGroundEntity( newGround );
+
+	// If we are on something...
+
+	if ( newGround )
+	{
+		CategorizeGroundSurface( *pm );
+
+		// Then we are not in water jump sequence
+		player->m_flWaterJumpTime = 0;
+
+		// Standing on an entity other than the world, so signal that we are touching something.
+		if ( !pm->DidHitWorld() )
+		{
+			MoveHelper()->AddToTouched( *pm, mv->m_vecVelocity );
+		}
+
+		if( player->GetMoveType() != MOVETYPE_NOCLIP )
+			mv->m_vecVelocity.z = 0.0f;
+	}
 }
+#ifdef GAME_DLL
+class CPortalMovementTraceFilter : public CTraceFilterSimple
+{
+public:
+	CPortalMovementTraceFilter( const IHandleEntity *passentity, int collisionGroup, ShouldHitFunc_t pExtraShouldHitCheckFn = NULL ) 
+		: CTraceFilterSimple( passentity, collisionGroup, pExtraShouldHitCheckFn ) {}
 
+	virtual bool ShouldHitEntity( IHandleEntity *pEntity, int contentsMask )
+	{
+		CBaseEntity *pEnt = EntityFromEntityHandle( pEntity );
+		if ( pEnt )
+		{
+			//const CPortal_Player *pPlayer = ToPortalPlayer( EntityFromEntityHandle( m_pPassEnt ) );
+			IPhysicsObject *pObj = pEnt->VPhysicsGetObject();
+			if ( /*pPlayer->m_bCatapulted &&*/ pObj && ( pObj->GetGameFlags() & FVPHYSICS_PLAYER_HELD ) )
+			{
+				return false;
+			}
+		}
+
+
+		return CTraceFilterSimple::ShouldHitEntity( pEntity, contentsMask );
+	}
+};
+
+#endif
 void CPortalGameMovement::TracePlayerBBox( const Vector& start, const Vector& end, unsigned int fMask, int collisionGroup, trace_t& pm )
 {
 	VPROF( "CGameMovement::TracePlayerBBox" );
@@ -689,9 +1030,9 @@ void CPortalGameMovement::TracePlayerBBox( const Vector& start, const Vector& en
 	ray.Init( start, end, GetPlayerMins(), GetPlayerMaxs() );
 
 #ifdef CLIENT_DLL
-	CTraceFilterSimple traceFilter( mv->m_nPlayerHandle.Get(), collisionGroup );
+	CTraceFilterSimple traceFilter( player, collisionGroup );
 #else
-	CTraceFilterSimple baseFilter( mv->m_nPlayerHandle.Get(), collisionGroup );
+	CTraceFilterSimple baseFilter( player, collisionGroup );
 	CTraceFilterTranslateClones traceFilter( &baseFilter );
 #endif
 
@@ -740,6 +1081,136 @@ CBaseHandle CPortalGameMovement::TestPlayerPosition( const Vector& pos, int coll
 	else
 	{	
 		return INVALID_EHANDLE_INDEX;
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: 
+//-----------------------------------------------------------------------------
+void CPortalGameMovement::FullWalkMove( )
+{
+	if ( !CheckWater() ) 
+	{
+		StartGravity();
+	}
+
+	// If we are leaping out of the water, just update the counters.
+	if (player->m_flWaterJumpTime)
+	{
+		WaterJump();
+		TryPlayerMove();
+		// See if we are still in water?
+		CheckWater();
+		return;
+	}
+
+	// If we are swimming in the water, see if we are nudging against a place we can jump up out
+	//  of, and, if so, start out jump.  Otherwise, if we are not moving up, then reset jump timer to 0
+	if ( player->GetWaterLevel() >= WL_Waist ) 
+	{
+		if ( player->GetWaterLevel() == WL_Waist )
+		{
+			CheckWaterJump();
+		}
+
+			// If we are falling again, then we must not trying to jump out of water any more.
+		if ( mv->m_vecVelocity[2] < 0 && 
+			 player->m_flWaterJumpTime )
+		{
+			player->m_flWaterJumpTime = 0;
+		}
+
+		// Was jump button pressed?
+		if (mv->m_nButtons & IN_JUMP)
+		{
+			CheckJumpButton();
+		}
+		else
+		{
+			mv->m_nOldButtons &= ~IN_JUMP;
+		}
+
+		// Perform regular water movement
+		WaterMove();
+
+		// Redetermine position vars
+		CategorizePosition();
+
+		// If we are on ground, no downward velocity.
+		if ( player->GetGroundEntity() != NULL )
+		{
+			mv->m_vecVelocity[2] = 0;			
+		}
+	}
+	else
+	// Not fully underwater
+	{
+		// Was jump button pressed?
+		if (mv->m_nButtons & IN_JUMP)
+		{
+ 			CheckJumpButton();
+		}
+		else
+		{
+			mv->m_nOldButtons &= ~IN_JUMP;
+		}
+
+		// Fricion is handled before we add in any base velocity. That way, if we are on a conveyor, 
+		//  we don't slow when standing still, relative to the conveyor.
+		if (player->GetGroundEntity() != NULL)
+		{
+			mv->m_vecVelocity[2] = 0.0;
+			player->m_Local.m_flFallVelocity = 0.0f;
+			Friction();
+		}
+
+		// Make sure velocity is valid.
+		CheckVelocity();
+		
+		CPortal_Player *pPortalPlayer = static_cast< CPortal_Player* >( player );
+		if ( pPortalPlayer->GetTractorBeam() )
+		{
+			TBeamMove();
+		}
+		else
+		{
+			if (player->GetGroundEntity() != NULL)
+			{
+				WalkMove();
+			}
+			else
+			{
+				AirMove();  // Take into account movement when in air.
+			}
+		}
+
+		// Set final flags.
+		CategorizePosition();
+
+		// Make sure velocity is valid.
+		CheckVelocity();
+
+		// Add any remaining gravitational component.
+		if ( !CheckWater() )
+		{
+			FinishGravity();
+		}
+
+		// If we are on ground, no downward velocity.
+		if ( player->GetGroundEntity() != NULL )
+		{
+			mv->m_vecVelocity[2] = 0;
+		}
+		CheckFalling();
+	}
+
+	if  ( ( m_nOldWaterLevel == WL_NotInWater && player->GetWaterLevel() != WL_NotInWater ) ||
+		  ( m_nOldWaterLevel != WL_NotInWater && player->GetWaterLevel() == WL_NotInWater ) )
+	{
+		PlaySwimSound();
+#if !defined( CLIENT_DLL )
+		player->Splash();
+#endif
 	}
 }
 

@@ -153,7 +153,7 @@ void CPortal_Dinosaur::Activate( void )
 {
 	// Find the current completion status of the dinosaurs
 	uint64 fStateFlags = 0;
-	CBaseAchievement *pTransmissionRecvd = dynamic_cast<CBaseAchievement *>(g_AchievementMgrPortal.GetAchievementByName("PORTAL_TRANSMISSION_RECEIVED"));
+	CBaseAchievement *pTransmissionRecvd = dynamic_cast<CBaseAchievement *>(g_AchievementMgrPortal.GetAchievementByName("PORTAL_TRANSMISSION_RECEIVED", 0));
 	if ( pTransmissionRecvd )
 	{
 		fStateFlags = pTransmissionRecvd->GetComponentBits();
@@ -485,7 +485,7 @@ void CSpawnDinosaurHack::LevelInitPostEntity()
 		return;
 	}
 
-	IAchievement *pHeartbreaker = g_AchievementMgrPortal.GetAchievementByName("PORTAL_BEAT_GAME");
+	IAchievement *pHeartbreaker = g_AchievementMgrPortal.GetAchievementByName("PORTAL_BEAT_GAME", 0);
 	if ( pHeartbreaker == NULL || pHeartbreaker->IsAchieved() == false )
 	{
 #if defined ( RADIO_DEBUG_SERVER )

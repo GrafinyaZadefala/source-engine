@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -13,6 +13,7 @@
 #include "decals.h"
 #include "physicsshadowclone.h"
 
+ConVar sv_portal_placement_on_paint("sv_portal_placement_on_paint", "1", FCVAR_REPLICATED | FCVAR_CHEAT, "Enable/Disable placing portal on painted surfaces");
 
 #define MAXIMUM_BUMP_DISTANCE ( ( PORTAL_HALF_WIDTH * 2.0f ) * ( PORTAL_HALF_WIDTH * 2.0f ) + ( PORTAL_HALF_HEIGHT * 2.0f ) * ( PORTAL_HALF_HEIGHT * 2.0f ) ) / 2.0f
 
@@ -55,8 +56,46 @@ bool IsMaterialInList( const csurface_t &surface, char *g_ppszMaterials[] )
 	return false;
 }
 
-bool IsNoPortalMaterial( const csurface_t &surface )
+bool IsOnPortalPaint( const trace_t &tr )
 {
+	if ( sv_portal_placement_on_paint.GetBool() && tr.m_pEnt)
+	{
+		if ( !UTIL_IsPaintableSurface( tr.surface ) )
+			return false;
+
+		PaintPowerType paintPower = NO_POWER;
+
+		//Trace for paint on the surface if it is the world
+		if( tr.m_pEnt->IsBSPModel() )
+		{
+			// enable portal placement on painted surface
+			paintPower = UTIL_Paint_TracePower( tr.m_pEnt, tr.endpos, tr.plane.normal );
+		}
+		else //For entities
+		{
+			if( FClassnameIs( tr.m_pEnt, "func_brush" ) )
+			{
+				paintPower = MapColorToPower( tr.m_pEnt->GetRenderColor() );
+			}
+		}
+
+		if( paintPower == PORTAL_POWER )
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool IsNoPortalMaterial( const trace_t &tr )
+{
+	//Note: this is for placing portal on paint
+	if ( IsOnPortalPaint( tr ) )
+		return false;
+
+	const csurface_t &surface = tr.surface;
+
 	if ( surface.flags & SURF_NOPORTAL )
 		return true;
 
@@ -859,7 +898,7 @@ bool FitPortalOnSurface( const CProp_Portal *pIgnorePortal, Vector &vOrigin, con
 				// Check if portal is aligned perfectly with intersection normals
 				float fPortalDot = sFitData[ piIntersectionIndex[ iIndex1 ] ].vIntersectionDirection.Dot( vRight );
 
-				if ( ( fPortalDot < 0.0001f && fPortalDot > -0.0001f ) || fPortalDot > 0.9999f || fPortalDot < -0.9999f )
+				if ( fPortalDot < 0.0001f && fPortalDot > -0.0001f || fPortalDot > 0.9999f || fPortalDot < -0.9999f )
 				{
 					float fBump1 = CalcDistanceToLine( pptCorner[ piIntersectionIndex[ iIndex1 ] ], 
 						sFitData[ piIntersectionIndex[ iIndex1 ] ].ptIntersectionPoint, 
@@ -1141,7 +1180,7 @@ bool IsPortalOnValidSurface( const Vector &vOrigin, const Vector &vForward, cons
 			return false;
 		}
 
-		if ( IsNoPortalMaterial( tr.surface ) )
+		if ( IsNoPortalMaterial( tr ) )
 		{
 			if ( sv_portal_placement_debug.GetBool() )
 			{
@@ -1225,7 +1264,7 @@ float VerifyPortalPlacement( const CProp_Portal *pIgnorePortal, Vector &vOrigin,
 		return PORTAL_ANALOG_SUCCESS_PASSTHROUGH_SURFACE;
 	}
 
-	if ( IsNoPortalMaterial( tr.surface ) )
+	if ( IsNoPortalMaterial( tr ) )
 	{
 		if ( sv_portal_placement_debug.GetBool() )
 		{

@@ -76,9 +76,6 @@ enum turretState_e
 	TURRET_DEAD,
 };
 
-// Forces glados actor to play reaction scenes when player dismounts camera.
-void PlayDismountSounds( void );
-
 
 //
 // Security Camera
@@ -1050,8 +1047,6 @@ void CNPC_SecurityCamera::InputRagdoll( inputdata_t &inputdata )
 
 	pPhysics->EnableMotion( true );
 	pPhysics->Wake();
-
-	PlayDismountSounds();
 }
 
 //-----------------------------------------------------------------------------
@@ -1106,62 +1101,4 @@ bool CNPC_SecurityCamera::CanBeAnEnemyOf( CBaseEntity *pEnemy )
 	} 
 
 	return BaseClass::CanBeAnEnemyOf( pEnemy );
-}
-
-
-void PlayDismountSounds()
-{
-	// Play GLaDOS's audio reaction
-	CPortal_Player* pPlayer = ToPortalPlayer( UTIL_PlayerByIndex( 1 ) );
-	CAI_BaseActor* pGlaDOS  = (CAI_BaseActor*)gEntList.FindEntityByName( NULL, "Aperture_AI" );
-	
-	if ( !pPlayer || !pGlaDOS )
-	{
-		DevMsg( 2, "Could not play CNPC_SecurityCamera dismount scene, make sure actor named 'Aperture_AI' is present in map.\n" );
-		return;
-	}
-
-	IGameEvent *event = gameeventmanager->CreateEvent( "security_camera_detached" );
-	if ( event )
-	{
-		gameeventmanager->FireEvent( event );
-	}
-	
-	// If glados is currently talking, don't let her talk over herself or interrupt a potentially important speech.
-	// Should we play the dismount sound after she's done? or is that too disjointed from the camera dismounting act to make sense...
-	if ( IsRunningScriptedScene( pGlaDOS, false ) )
-	{
-		return;
-	}
-
-	pPlayer->IncNumCamerasDetatched();
-	int iNumCamerasDetatched = pPlayer->GetNumCamerasDetatched();
-
-	// If they've knocked down every one possible, play special '1' sound.
-	if ( iNumCamerasDetatched == SECURITY_CAMERA_TOTAL_TO_KNOCK_DOWN )
-	{
-		InstancedScriptedScene( pGlaDOS, CAMERA_DESTROYED_SCENE_1 );
-	}
-	else // iNumCamerasDetatched < SECURITY_CAMERA_TOTAL_TO_KNOCK_DOWN
-	{
-		// Play different sounds based on progress towards security camera knockdown total.
-		switch ( iNumCamerasDetatched )
-		{
-			case 1:
-				InstancedScriptedScene( pGlaDOS, CAMERA_DESTROYED_SCENE_2 );
-				break;
-
-			case 2:
-				InstancedScriptedScene( pGlaDOS, CAMERA_DESTROYED_SCENE_3 );
-				break;
-
-			case 3:
-				InstancedScriptedScene( pGlaDOS, CAMERA_DESTROYED_SCENE_4 );
-				break;
-
-			default:
-				InstancedScriptedScene( pGlaDOS, CAMERA_DESTROYED_SCENE_5 );
-				break;
-		}
-	}
 }

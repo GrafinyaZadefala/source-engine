@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -9,12 +9,13 @@
 #include "achievementmgr.h"
 #include "baseachievement.h"
 
-#ifdef GAME_DLL
+// Don't bother with achievements yet
+#if defined ( GAME_DLL )
 #include "prop_portal.h"
 #include "util.h"
 
 CAchievementMgr g_AchievementMgrPortal;	// global achievement mgr for Portal
-
+#if 0
 class CAchievementPortalInfiniteFall : public CBaseAchievement
 {
 	DECLARE_CLASS( CAchievementPortalInfiniteFall, CBaseAchievement );
@@ -493,57 +494,12 @@ public:
 DECLARE_ACHIEVEMENT( CAchievementPortalHitTurretWithTurret, ACHIEVEMENT_PORTAL_HIT_TURRET_WITH_TURRET, "PORTAL_HIT_TURRET_WITH_TURRET", 5 );
 
 
-#ifndef _XBOX
-class CAchievementPortalFindAllDinosaurs : public CBaseAchievement
-{
-	DECLARE_CLASS( CAchievementPortalFindAllDinosaurs, CBaseAchievement );
-	void Init() 
-	{
-		SetFlags( ACH_HAS_COMPONENTS | ACH_SAVE_GLOBAL );
-		m_iNumComponents = 26;
-		SetStoreProgressInSteam( true );
-		SetGoal( m_iNumComponents );
-		BaseClass::Init();
-		m_iProgressMsgMinimum = 1;
-	}
-	virtual void ListenForEvents()
-	{
-		ListenForGameEvent( "dinosaur_signal_found" );
-	}
-	virtual void FireGameEvent_Internal( IGameEvent *event )
-	{
-		if ( 0 == Q_strcmp( event->GetName(), "dinosaur_signal_found" ) )
-		{
-			int id = event->GetInt( "id", -1 );
-			Assert( id >= 0 && id < m_iNumComponents );
-			if ( id >= 0 && id < m_iNumComponents )
-			{
-				EnsureComponentBitSetAndEvaluate( id );
-
-#ifndef DISABLE_STEAM
-				// Update our Steam stat
-				steamapicontext->SteamUserStats()->SetStat( "PORTAL_TRANSMISSION_RECEIVED_STAT", m_iCount );
-#endif
-			}
-			else
-			{
-				Warning( "Failed to set achievement progress. Dinosaur ID(%d) out of range (0 to %d)\n", id, m_iNumComponents );
-			}
-		}
-	}
-	virtual void CalcProgressMsgIncrement()
-	{
-		// Show progress every tick
-		m_iProgressMsgIncrement = 1;
-	}
-};
-DECLARE_ACHIEVEMENT( CAchievementPortalFindAllDinosaurs, ACHIEVEMENT_PORTAL_TRANSMISSION_RECEIVED, "PORTAL_TRANSMISSION_RECEIVED", 0 );
-#endif // _XBOX
-
 // achievements which are won by a map event firing once
 DECLARE_MAP_EVENT_ACHIEVEMENT( ACHIEVEMENT_PORTAL_GET_PORTALGUNS, "PORTAL_GET_PORTALGUNS", 5 );
 DECLARE_MAP_EVENT_ACHIEVEMENT( ACHIEVEMENT_PORTAL_KILL_COMPANIONCUBE, "PORTAL_KILL_COMPANIONCUBE", 5 );
 DECLARE_MAP_EVENT_ACHIEVEMENT( ACHIEVEMENT_PORTAL_ESCAPE_TESTCHAMBERS, "PORTAL_ESCAPE_TESTCHAMBERS", 5 );
 DECLARE_MAP_EVENT_ACHIEVEMENT( ACHIEVEMENT_PORTAL_BEAT_GAME, "PORTAL_BEAT_GAME", 10 );
+
+#endif // #if 0
 
 #endif // GAME_DLL

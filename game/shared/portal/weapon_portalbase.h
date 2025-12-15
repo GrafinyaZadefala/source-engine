@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -28,7 +28,7 @@ class CPortal_Player;
 // MIKETODO: this should use indexing instead of searching and strcmp()'ing all the time.
 bool IsAmmoType( int iAmmoType, const char *pAmmoName );
 
-typedef enum
+enum
 {
 	WEAPON_NONE = 0,
 
@@ -54,11 +54,11 @@ typedef enum
 	//Other
 	WEAPON_SHOTGUN,
 	WEAPON_CROSSBOW,
-	WEAPON_RPG,
+	WEAPON_RPG
 
-	WEAPON_MAX,		// number of weapons weapon index
+	//WEAPON_MAX,		// number of weapons weapon index
 
-} PortalWeaponID;
+};
 
 class CWeaponPortalBase : public CBaseCombatWeapon
 {
@@ -84,7 +84,7 @@ public:
 	CPortal_Player* GetPortalPlayerOwner() const;
 
 	// Get specific Portal weapon ID (ie: WEAPON_PORTALGUN, etc)
-	virtual PortalWeaponID GetWeaponID( void ) const { return WEAPON_NONE; }
+	virtual int GetWeaponID( void ) const { return WEAPON_NONE; }
 
 	void WeaponSound( WeaponSound_t sound_type, float soundtime = 0.0f );
 	
@@ -96,7 +96,7 @@ public:
 public:
 	#if defined( CLIENT_DLL )
 	
-		virtual int		DrawModel( int flags );
+		virtual int		DrawModel( int flags, const RenderableInstance_t &instance );
 		virtual bool	ShouldDraw( void );
 		virtual bool	ShouldDrawCrosshair( void ) { return true; }
 		virtual bool	ShouldPredict();

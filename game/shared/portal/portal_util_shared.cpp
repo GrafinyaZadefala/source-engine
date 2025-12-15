@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -11,20 +11,26 @@
 #include "portal_shareddefs.h"
 #include "portal_collideable_enumerator.h"
 #include "beam_shared.h"
-#include "collisionutils.h"
+#include "CollisionUtils.h"
 #include "util_shared.h"
+#include "coordsize.h"
 #ifndef CLIENT_DLL
-	#include "util.h"
-	#include "ndebugoverlay.h"
+	#include "Util.h"
+	#include "NDebugOverlay.h"
 	#include "env_debughistory.h"
 #else
 	#include "c_portal_player.h"
 #endif
 #include "PortalSimulation.h"
 
+
+extern void AddPaintDataToSave( CBaseEntity* pBrushEntity, const Vector& contactPoint, PaintPowerType power, float flPaintRadius, float flAlphaPercent, Vector vContactNormal );
 bool g_bAllowForcePortalTrace = false;
 bool g_bForcePortalTrace = false;
 bool g_bBulletPortalTrace = false;
+
+// paint convars
+ConVar sv_paint_detection_sphere_radius( "sv_paint_detection_sphere_radius", "16.f", FCVAR_REPLICATED | FCVAR_CHEAT, "The radius of the query sphere used to find the color of a light map at a contact point in world space." );
 
 ConVar sv_portal_trace_vs_world ("sv_portal_trace_vs_world", "1", FCVAR_REPLICATED | FCVAR_CHEAT, "Use traces against portal environment world geometry" );
 ConVar sv_portal_trace_vs_displacements ("sv_portal_trace_vs_displacements", "1", FCVAR_REPLICATED | FCVAR_CHEAT, "Use traces against portal environment displacement geometry" );
@@ -52,17 +58,15 @@ public:
 
 	//abstract functions which require no transforms, just pass them along to the wrapped collideable
 	virtual IHandleEntity	*GetEntityHandle() { return m_pWrappedCollideable->GetEntityHandle(); }
-	virtual const Vector&	OBBMinsPreScaled() const { return m_pWrappedCollideable->OBBMinsPreScaled(); }
-	virtual const Vector&	OBBMaxsPreScaled() const { return m_pWrappedCollideable->OBBMaxsPreScaled(); }
-	virtual const Vector&	OBBMins() const { return m_pWrappedCollideable->OBBMins(); }
-	virtual const Vector&	OBBMaxs() const { return m_pWrappedCollideable->OBBMaxs(); }
-	virtual int				GetCollisionModelIndex() { return m_pWrappedCollideable->GetCollisionModelIndex(); }
-	virtual const model_t*	GetCollisionModel() { return m_pWrappedCollideable->GetCollisionModel(); }
-	virtual SolidType_t		GetSolid() const { return m_pWrappedCollideable->GetSolid(); }
-	virtual int				GetSolidFlags() const { return m_pWrappedCollideable->GetSolidFlags(); }
-	virtual IClientUnknown*	GetIClientUnknown() { return m_pWrappedCollideable->GetIClientUnknown(); }
-	virtual int				GetCollisionGroup() const { return m_pWrappedCollideable->GetCollisionGroup(); }
-	virtual bool			ShouldTouchTrigger( int triggerSolidFlags ) const { return m_pWrappedCollideable->ShouldTouchTrigger(triggerSolidFlags); }
+	virtual const Vector&	OBBMins() const { return m_pWrappedCollideable->OBBMins(); };
+	virtual const Vector&	OBBMaxs() const { return m_pWrappedCollideable->OBBMaxs(); };
+	virtual int				GetCollisionModelIndex() { return m_pWrappedCollideable->GetCollisionModelIndex(); };
+	virtual const model_t*	GetCollisionModel() { return m_pWrappedCollideable->GetCollisionModel(); };
+	virtual SolidType_t		GetSolid() const { return m_pWrappedCollideable->GetSolid(); };
+	virtual int				GetSolidFlags() const { return m_pWrappedCollideable->GetSolidFlags(); };
+	virtual IClientUnknown*	GetIClientUnknown() { return m_pWrappedCollideable->GetIClientUnknown(); };
+	virtual int				GetCollisionGroup() const { return m_pWrappedCollideable->GetCollisionGroup(); };
+	virtual bool			ShouldTouchTrigger( int triggerSolidFlags ) const { return m_pWrappedCollideable->ShouldTouchTrigger(triggerSolidFlags); };
 
 	//slightly trickier functions
 	virtual void			WorldSpaceTriggerBounds( Vector *pVecWorldMins, Vector *pVecWorldMaxs ) const;
@@ -176,6 +180,9 @@ void UTIL_Portal_Trace_Filter( CTraceFilterSimpleClassnameList *traceFilterPorta
 	traceFilterPortalShot->AddClassnameToIgnore( "prop_ragdoll" );
 	traceFilterPortalShot->AddClassnameToIgnore( "prop_glados_core" );
 	traceFilterPortalShot->AddClassnameToIgnore( "updateitem2" );
+	traceFilterPortalShot->AddClassnameToIgnore( "prop_weighted_cube" );
+	traceFilterPortalShot->AddClassnameToIgnore( "projected_wall_entity" );
+	traceFilterPortalShot->AddClassnameToIgnore( "prop_paint_bomb" );
 }
 
 
@@ -784,6 +791,15 @@ void UTIL_Portal_TraceRay( const CProp_Portal *pPortal, const Ray_t &ray, unsign
 	UTIL_Portal_TraceRay( pPortal, ray, fMask, &traceFilter, pTrace, bTraceHolyWall );
 }
 
+void UTIL_Portal_Laser_Prevent_Tilting( Vector& vDirection )
+{
+	if ( fabs( vDirection.z ) < 0.1 )
+	{
+		vDirection.z = 0.f;
+		vDirection.NormalizeInPlace();
+	}
+}
+
 //-----------------------------------------------------------------------------
 // Purpose: Trace a ray 'past' a portal's surface, hitting objects in the linked portal's collision environment
 // Input  : *pPortal - The portal being traced 'through'
@@ -830,6 +846,78 @@ void UTIL_PortalLinked_TraceRay( const CProp_Portal *pPortal, const Ray_t &ray, 
 {
 	CTraceFilterSimple traceFilter( ignore, collisionGroup );
 	UTIL_PortalLinked_TraceRay( pPortal, ray, fMask, &traceFilter, pTrace, bTraceHolyWall );
+}
+
+
+int UTIL_Portal_EntitiesAlongRayComplex( int *entSegmentIndices, int *segCount, int maxEntities, ComplexPortalTrace_t *pResultSegmentArray, int maxSegments, const Ray_t& ray, ICountedPartitionEnumerator* pEnum, ITraceFilter* pTraceFilter, int fStopTraceContents )
+{
+	if( !pEnum )
+		return 0;
+
+	CTraceFilterHitAll dummyFilter;
+	if( !pTraceFilter )
+		pTraceFilter = &dummyFilter;
+
+	ComplexPortalTrace_t dummySegmentResults[16];
+	if( !pResultSegmentArray )
+	{
+		pResultSegmentArray = dummySegmentResults;
+		maxSegments = ARRAYSIZE( dummySegmentResults );
+	}
+
+	// Run a complex trace that hits only the world to get all the segments to trace with
+	const int segmentCount = UTIL_Portal_ComplexTraceRay( ray, fStopTraceContents, pTraceFilter, pResultSegmentArray, maxSegments );
+	if( segCount )
+		*segCount = segmentCount;
+
+	for( int i = 0; i < segmentCount && pEnum->GetCount() < maxEntities; ++i )
+	{
+		// Enumerate all entities along the ray
+		Ray_t segmentRay;
+		segmentRay.Init( pResultSegmentArray[i].trSegment.startpos, pResultSegmentArray[i].trSegment.endpos - DIST_EPSILON * pResultSegmentArray[i].trSegment.plane.normal );
+		//NDebugOverlay::Line( segmentRay.m_Start, segmentRay.m_Start + segmentRay.m_Delta, 0, 255, 0, false, 5 );
+
+		const int oldEnumCount = pEnum->GetCount();
+
+		#ifdef GAME_DLL
+		const int PARTITION_ALL_SERVER_EDICTS = PARTITION_ENGINE_NON_STATIC_EDICTS | PARTITION_ENGINE_STATIC_PROPS | PARTITION_ENGINE_SOLID_EDICTS | PARTITION_ENGINE_TRIGGER_EDICTS;
+		if( segmentRay.m_Delta.IsZeroFast() )
+			::partition->EnumerateElementsAtPoint( PARTITION_ALL_SERVER_EDICTS, segmentRay.m_Start, false, pEnum );
+		else
+			::partition->EnumerateElementsAlongRay( PARTITION_ALL_SERVER_EDICTS, segmentRay, false, pEnum );
+		#else
+		if( segmentRay.m_Delta.IsZeroFast() )
+			::partition->EnumerateElementsAtPoint( PARTITION_ALL_CLIENT_EDICTS, segmentRay.m_Start, false, pEnum );
+		else
+			::partition->EnumerateElementsAlongRay( PARTITION_ALL_CLIENT_EDICTS, segmentRay, false, pEnum );
+		#endif
+
+		const int newEnumCount = pEnum->GetCount();
+		const int remainingEnts = MAX( 0, maxEntities - newEnumCount );
+		const int rayEnumCount = MIN( remainingEnts, newEnumCount - oldEnumCount );
+		if( entSegmentIndices )
+		{
+			for( int j = 0; j < rayEnumCount; ++j, ++entSegmentIndices )
+			{
+				*entSegmentIndices = i;
+			}
+		}
+	}
+
+	// Add whatever stopped the trace
+	CBaseEntity* pLastTraceEntity = segmentCount ? pResultSegmentArray[segmentCount - 1].trSegment.m_pEnt : NULL;
+	if( pLastTraceEntity && pEnum->GetCount() < maxEntities )
+	{
+		const int oldCount = pEnum->GetCount();
+		pEnum->EnumElement( pLastTraceEntity );
+		if( pEnum->GetCount() == oldCount + 1 )
+		{
+			if( entSegmentIndices )
+				*entSegmentIndices = segmentCount - 1;
+		}
+	}
+
+	return pEnum->GetCount();
 }
 
 //-----------------------------------------------------------------------------
@@ -1121,6 +1209,183 @@ void UTIL_Portal_RayTransform( const VMatrix matThisToLinked, const Ray_t &raySo
 		rayTransformed.m_Extents.z = -rayTransformed.m_Extents.z;
 	}
 
+}
+
+struct IntersectionCachedData_t
+{
+	Vector vCenter;
+	VPlane plane;
+	Vector vUp, vRight;
+	float fRadiusSquare;
+};
+
+inline CProp_Portal *UTIL_Portal_ClipTraceToFirstTransformingPortal( trace_t &tr, const Vector &vRayNormalizedDelta, const float fRayRadius, CProp_Portal **pPortals, IntersectionCachedData_t *pIntersectionData, const int iPortalCount )
+{
+	Vector vIntersection;
+	float fIntersectionScale = FLT_MAX; //a pseudo-distance. Expressed as a scale of the existing trace length (which we never actually compute)
+	CProp_Portal *pIntersectionPortal = NULL;
+
+	//Portal-Ray intersection has the following axioms that allow for some cheap checks up front
+	//intersection requires the ray to start in front of the portal plane and end behind it
+	//intersection requires the ray to intersect a quad on the portal plane
+	bool bFullTrace = tr.fraction == 1.0f;
+	for( int i = 0; i != iPortalCount; ++i )
+	{
+		float fStartDot = pIntersectionData[i].plane.DistTo( tr.startpos );
+		float fEndDot =  pIntersectionData[i].plane.DistTo( tr.endpos );
+
+		if( fEndDot >= fStartDot ) //ray would be coming out of portal instead of going in (or didn't move at all)
+			continue;
+
+		if( (fStartDot + fRayRadius) < 0.0f )
+			continue; //ray started wholly behind the portal
+
+		if( bFullTrace && (fEndDot > (1.0f / 4096.0f)) )
+			continue; //ray reached it's destination before the center crossed the portal plane
+
+		if( (fEndDot - fRayRadius) - (1.0f / 4096.0f) > 0.01f )
+			continue; //ray ended wholly in front of the portal
+
+		//compute portal distance to the (infinite) ray
+		Vector vRayStartToPortal = pIntersectionData[i].vCenter - tr.startpos;
+		Vector vProjected = vRayNormalizedDelta * vRayStartToPortal.Dot( vRayNormalizedDelta );
+		Vector vRayClosestToPortal = vRayStartToPortal - vProjected;
+
+		if( vRayClosestToPortal.LengthSqr() > pIntersectionData[i].fRadiusSquare )
+			continue; //portal quad is too far away for the ray's center to intersect it. This doesn't take ray extents into account because we're assuming a successful teleportation requires at least the center of the ray to intersect
+
+		//If we're here. The ray at least grazes the portal. An intersection between the ray and this portal is very probable
+		//NOTE: For rays with extents, it's possible that the end position stops short of the portal because it hit the wall behind the portal.
+		float fRayIntersectionScale = fStartDot / (fStartDot - fEndDot); //how far (relative to the trace length) along the ray normal do we go before hitting the plane
+		if( fRayIntersectionScale > fIntersectionScale ) //already have something closer
+			continue;
+
+		if( (fRayIntersectionScale * tr.fraction) > 1.0f )
+			continue; //in the case of a ray with extents, some of the code above assumes a trace that stops short *would have* gone through, this is the actual check to verify that is the truth
+
+		Vector vPlaneIntersection = (fRayIntersectionScale * tr.endpos) + ( (1.0f - fRayIntersectionScale) * tr.startpos ); //barycentric
+		//Vector vPlaneIntersection = tr.startpos + (vRayNormalizedDelta * fRayIntersectionLength);
+#ifdef DBGFLAG_ASSERT
+		float fIntersectionPlaneDist = fabs( pIntersectionData[i].plane.DistTo( vPlaneIntersection ) );
+		AssertOnce( fIntersectionPlaneDist <= (1.0f/256.0f) ); //arbitrary small float that's a power of 2. FLT_MIN is too small
+#endif
+
+		Vector vPortalSpacePlaneIntersection = vPlaneIntersection - pIntersectionData[i].vCenter; //move our calculation space to portal centric to make the following math simpler
+		if( fabs( pIntersectionData[i].vRight.Dot( vPortalSpacePlaneIntersection ) ) > PORTAL_HALF_WIDTH )
+			continue; //ray center outside of portal quad
+
+		if( fabs( pIntersectionData[i].vUp.Dot( vPortalSpacePlaneIntersection ) ) > PORTAL_HALF_HEIGHT )
+			continue; //ray center outside of portal quad
+
+		//HIT! You sank my portalship. Don't know if the entire ray intersects, but at least the center does
+
+		//which is good enough for now. TODO: Test forwardmost corners as well?
+		AssertMsgOnce( fRayRadius < 20.0f, "This code is currently designed to assume the traced rays have small extents" );
+		fIntersectionScale = fRayIntersectionScale;
+		vIntersection = vPlaneIntersection;
+		pIntersectionPortal = pPortals[i];
+	}
+
+	if( pIntersectionPortal != NULL )
+	{
+		//clip the trace to closest
+		tr.endpos = vIntersection;
+		tr.fraction *= fIntersectionScale;
+		tr.m_pEnt = pIntersectionPortal;
+		return pIntersectionPortal;
+	}
+
+	return NULL;
+}
+
+int UTIL_Portal_ComplexTraceRay( const Ray_t &ray, unsigned int mask, ITraceFilter *pTraceFilter, ComplexPortalTrace_t *pResultSegmentArray, int iMaxSegments )
+{
+	if( (pResultSegmentArray == NULL) || (iMaxSegments <= 0) )
+		return 0;
+
+	if( !ray.m_IsSwept )
+	{
+		Assert( 0 ); //shame on you for wasting our time
+		return 0;
+	}
+
+	int iPortalCount = CProp_Portal_Shared::AllPortals.Count();
+	CProp_Portal **pPortals = pPortals = (CProp_Portal **)stackalloc( sizeof( CProp_Portal * ) * iPortalCount );
+	if( iPortalCount != 0 )
+	{
+		//we only care about active/linked portals, so reduce the list to that set		
+		CProp_Portal **pAllPortals = CProp_Portal_Shared::AllPortals.Base();
+		int iWriteIndex = 0;
+		for( int i = 0; i != iPortalCount; ++i )
+		{
+			if( pAllPortals[i]->IsActivedAndLinked() )
+			{
+				pPortals[iWriteIndex++] = pAllPortals[i];
+			}
+		}
+
+		iPortalCount = iWriteIndex;
+	}
+
+	pResultSegmentArray[0].pSegmentStartPortal = NULL;
+
+	if( iPortalCount == 0 )
+	{
+		//trivial case where it's impossible that it hit any portals
+		pResultSegmentArray[0].pSegmentEndPortal = NULL;
+		pResultSegmentArray[0].vNormalizedDelta = ray.m_Delta.Normalized();
+		enginetrace->TraceRay( ray, mask, pTraceFilter, &pResultSegmentArray[0].trSegment );
+		return 1;
+	}
+
+	//cache/compute some data to speed up further tests
+	IntersectionCachedData_t *pIntersectionData = (IntersectionCachedData_t *)stackalloc( sizeof( IntersectionCachedData_t ) * iPortalCount );
+	for( int i = 0; i != iPortalCount; ++i )
+	{
+		pIntersectionData[i].vCenter = pPortals[i]->GetAbsOrigin();
+		pIntersectionData[i].plane.Init( pPortals[i]->m_plane_Origin.normal, pPortals[i]->m_plane_Origin.dist );
+		pIntersectionData[i].vRight = pPortals[i]->m_vRight;
+		pIntersectionData[i].vUp = pPortals[i]->m_vUp;
+		
+		float x,y;
+		x = PORTAL_HALF_WIDTH;
+		y = PORTAL_HALF_HEIGHT;
+		pIntersectionData[i].fRadiusSquare = ( (x * x) + (y * y) );
+	}
+
+	float fRayRadius = ray.m_Extents.Length();
+	float fRemainingLength = ray.m_Delta.Length(); //the ray will continually get shorter as segments use up the original delta
+	Vector vRayNormalizedDelta = ray.m_Delta * (1.0f / fRemainingLength);
+	Ray_t workRay = ray;
+
+	pResultSegmentArray[0].vNormalizedDelta = vRayNormalizedDelta;
+
+	enginetrace->TraceRay( workRay, mask, pTraceFilter, &pResultSegmentArray[0].trSegment );
+	pResultSegmentArray[0].pSegmentEndPortal = UTIL_Portal_ClipTraceToFirstTransformingPortal( pResultSegmentArray[0].trSegment, vRayNormalizedDelta, fRayRadius, pPortals, pIntersectionData, iPortalCount );
+	
+	for( int iSegmentIndex = 1; iSegmentIndex < iMaxSegments; ++iSegmentIndex )
+	{
+		CProp_Portal *pTransformPortal = pResultSegmentArray[iSegmentIndex - 1].pSegmentEndPortal;
+		if( pTransformPortal == NULL )
+			return iSegmentIndex;
+
+		fRemainingLength -= (fRemainingLength * pResultSegmentArray[iSegmentIndex - 1].trSegment.fraction);
+		if( fRemainingLength <= 0.0f )
+			return iSegmentIndex;
+
+		const VMatrix &transformMatrix = pTransformPortal->MatrixThisToLinked();		
+		vRayNormalizedDelta = transformMatrix.ApplyRotation( vRayNormalizedDelta );
+		workRay.m_Start = (transformMatrix * pResultSegmentArray[iSegmentIndex - 1].trSegment.endpos) + (vRayNormalizedDelta * 0.5f); //NOTE: if extents are non-zero. It's possible this will start in solid
+		workRay.m_Delta = vRayNormalizedDelta * fRemainingLength;
+		pResultSegmentArray[iSegmentIndex].vNormalizedDelta = vRayNormalizedDelta;
+
+		pResultSegmentArray[iSegmentIndex].pSegmentStartPortal = pTransformPortal->m_hLinkedPortal.Get();
+
+		enginetrace->TraceRay( workRay, mask, pTraceFilter, &pResultSegmentArray[iSegmentIndex].trSegment );
+		pResultSegmentArray[iSegmentIndex].pSegmentEndPortal = UTIL_Portal_ClipTraceToFirstTransformingPortal( pResultSegmentArray[iSegmentIndex].trSegment, vRayNormalizedDelta, fRayRadius, pPortals, pIntersectionData, iPortalCount );	
+	}
+
+	return iMaxSegments;
 }
 
 void UTIL_Portal_PlaneTransform( const VMatrix matThisToLinked, const cplane_t &planeSource, cplane_t &planeTransformed )
@@ -1687,6 +1952,33 @@ bool UTIL_Portal_EntityIsInPortalHole( const CProp_Portal *pPortal, CBaseEntity 
 		vPortalRight, PORTAL_HALF_WIDTH + 1.0f, vPortalUp, PORTAL_HALF_HEIGHT + 1.0f );
 }
 
+const Vector UTIL_ProjectPointOntoPlane( const Vector& point, const cplane_t& plane )
+{
+	return point - (DotProduct( point, plane.normal ) - plane.dist) * plane.normal;
+}
+
+
+
+bool UTIL_PointIsNearPortal( const Vector& point, const CProp_Portal* pPortal, float planeDist, float radiusReduction )
+{
+	AssertMsg( pPortal != NULL, "Null pointers are bad, and you should feel bad." );
+
+	const cplane_t& portalPlane = pPortal->m_plane_Origin;
+	Vector transformedPt, origin;
+	pPortal->WorldToEntitySpace( point, &transformedPt );
+	pPortal->WorldToEntitySpace( UTIL_ProjectPointOntoPlane( pPortal->WorldSpaceCenter(), portalPlane ), &origin );
+
+	AssertMsg( PORTAL_HALF_WIDTH > radiusReduction && PORTAL_HALF_HEIGHT > radiusReduction, "Reduction of the box is too high." );
+	const float halfWidth = PORTAL_HALF_WIDTH - radiusReduction;
+	const float halfHeight = PORTAL_HALF_HEIGHT - radiusReduction;
+	const Vector boxMin( origin[0] - planeDist, origin[1] - halfWidth, origin[2] - halfHeight );
+	const Vector boxMax( origin[0] + planeDist, origin[1] + halfWidth, origin[2] + halfHeight );
+
+	return (transformedPt[0] >= boxMin[0] && transformedPt[0] <= boxMax[0]) &&
+		   (transformedPt[1] >= boxMin[1] && transformedPt[1] <= boxMax[1]) &&
+		   (transformedPt[2] >= boxMin[2] && transformedPt[2] <= boxMax[2]);
+}
+
 
 #ifdef CLIENT_DLL
 void UTIL_TransformInterpolatedAngle( CInterpolatedVar< QAngle > &qInterped, matrix3x4_t matTransform, bool bSkipNewest )
@@ -1695,7 +1987,7 @@ void UTIL_TransformInterpolatedAngle( CInterpolatedVar< QAngle > &qInterped, mat
 	if( !qInterped.IsValidIndex( iHead ) )
 		return;
 
-#ifdef DBGFLAG_ASSERT
+#ifdef _DEBUG
 	float fHeadTime;
 	qInterped.GetHistoryValue( iHead, fHeadTime );
 #endif
@@ -1730,7 +2022,7 @@ void UTIL_TransformInterpolatedPosition( CInterpolatedVar< Vector > &vInterped, 
 	if( !vInterped.IsValidIndex( iHead ) )
 		return;
 
-#ifdef DBGFLAG_ASSERT
+#ifdef _DEBUG
 	float fHeadTime;
 	vInterped.GetHistoryValue( iHead, fHeadTime );
 #endif
@@ -1772,3 +2064,179 @@ void CC_Debug_FixMyPosition( void )
 
 static ConCommand debug_fixmyposition("debug_fixmyposition", CC_Debug_FixMyPosition, "Runs FindsClosestPassableSpace() on player.", FCVAR_CHEAT );
 #endif
+
+
+#ifdef GAME_DLL
+
+bool CBrushEntityList::EnumEntity( IHandleEntity *pHandleEntity )
+{
+	if ( !pHandleEntity )
+		return true;
+
+	CBaseEntity *pEntity = gEntList.GetBaseEntity( pHandleEntity->GetRefEHandle() );
+	if ( !pEntity )
+		return true;
+
+	if ( pEntity->IsBSPModel() )
+	{
+		m_BrushEntitiesToPaint.AddToTail( pEntity );
+	}
+
+	return true;
+}
+
+
+void UTIL_FindBrushEntitiesInSphere( CBrushEntityList& brushEnum, const Vector& vCenter, float flRadius )
+{
+	Vector vExtents = flRadius * Vector( 1.f, 1.f, 1.f );
+	enginetrace->EnumerateEntities( vCenter - vExtents, vCenter + vExtents, &brushEnum );
+}
+
+#endif
+
+
+bool UTIL_IsPaintableSurface( const csurface_t& surface )
+{
+	return !( surface.flags & SURF_NOPAINT );
+}
+
+extern bool AreaHasOtherPaintPower( CBaseEntity* pBrushEntity, const Vector& contactPoint, PaintPowerType power, Vector vContactNormal );
+
+float UTIL_PaintBrushEntity( CBaseEntity* pBrushEntity, const Vector& contactPoint, PaintPowerType power, float flPaintRadius, float flAlphaPercent, const Vector& vContactNormal )
+{
+	if ( !pBrushEntity )
+	{
+		// HACK HACK: Fix it for real Bank! :)
+		return 0.0f;
+	}
+
+	if ( !pBrushEntity->IsBSPModel() )
+	{
+		return 0.0f;
+	}
+	
+	if ( !AreaHasOtherPaintPower( pBrushEntity, contactPoint, power, vContactNormal ) )
+	{
+		return 0.0f;
+	}
+	Vector vEntitySpaceContactPoint;
+	pBrushEntity->WorldToEntitySpace( contactPoint, &vEntitySpaceContactPoint );
+
+#ifdef GAME_DLL
+	AddPaintDataToSave( pBrushEntity, vEntitySpaceContactPoint, power, flPaintRadius, flAlphaPercent, vContactNormal );
+#endif
+	
+	Color color = MapPowerToColor( power );
+
+	engine->PaintSurface( pBrushEntity->GetModel(), vEntitySpaceContactPoint, color, flPaintRadius );
+
+	return flPaintRadius;
+}
+
+Color GetAveragePaintColorFromVector( CUtlVector<Color> &colors )
+{	
+	if ( colors.Count() == 0 )
+		return Color( 0, 0, 0, 0 );
+
+	int r = 0;
+	int g = 0;
+	int b = 0;
+	int a = 0;
+
+	// We really need to get these power colors
+	for (int i = 0; i < colors.Count(); ++i)
+	{	
+		Color color = colors.Element(i);
+		// Add up all values
+		r += color.r();
+		g += color.g();
+		b += color.b();
+		a += color.a();
+	}
+
+	// Get the average
+	r = r / colors.Count();
+	g = g / colors.Count();
+	b = b / colors.Count();
+	a = a / colors.Count();
+	
+	Assert( r >= 0 && r <= 255 );
+	Assert( b >= 0 && b <= 255 );
+	Assert( g >= 0 && g <= 255 );
+	Assert( a >= 0 && a <= 255 );
+	return Color( r, g, b, a );
+}
+
+PaintPowerType UTIL_Paint_TracePower_Old( CBaseEntity* pBrushEntity, const Vector& contactPoint, const Vector& vContactNormal )
+{
+	if ( !pBrushEntity->IsBSPModel() )
+	{
+		return NO_POWER;
+	}
+
+	CUtlVector<Color> color;
+
+	// Transform contact point from world to entity space
+	Vector vEntitySpaceContactPoint;
+	pBrushEntity->WorldToEntitySpace( contactPoint, &vEntitySpaceContactPoint );
+	
+	engine->TracePaintSurface( pBrushEntity->GetModel(), vEntitySpaceContactPoint, sv_paint_detection_sphere_radius.GetFloat(), color );
+
+	return MapColorToPower( GetAveragePaintColorFromVector( color ) );
+}
+
+PaintPowerType UTIL_Paint_TracePower( CBaseEntity* pBrushEntity, const Vector& contactPoint, const Vector& vContactNormal, float *pflDetectionRadius )
+{
+	if ( !pBrushEntity->IsBSPModel() )
+	{
+		return NO_POWER;
+	}
+
+	CUtlVector<Color> color;
+
+	// Transform contact point from world to entity space
+	Vector vEntitySpaceContactPoint;
+	pBrushEntity->WorldToEntitySpace( contactPoint, &vEntitySpaceContactPoint );
+
+	float radius;
+	if ( pflDetectionRadius )
+	{
+		radius = *pflDetectionRadius;
+	}
+	else
+	{
+		radius = sv_paint_detection_sphere_radius.GetFloat();
+	}
+
+	engine->TracePaintSurface( pBrushEntity->GetModel(), vEntitySpaceContactPoint, radius, color );
+
+	return MapColorToPower( color );
+}
+
+Color UTIL_Paint_TraceColor( CBaseEntity* pBrushEntity, const Vector& contactPoint, const Vector& vContactNormal, float *pflDetectionRadius )
+{
+	if ( !pBrushEntity->IsBSPModel() )
+	{
+		return Color(0,0,0,0);
+	}
+
+	CUtlVector<Color> color;
+
+	// Transform contact point from world to entity space
+	Vector vEntitySpaceContactPoint;
+	pBrushEntity->WorldToEntitySpace( contactPoint, &vEntitySpaceContactPoint );
+
+	float radius;
+	if ( pflDetectionRadius )
+	{
+		radius = *pflDetectionRadius;
+	}
+	else
+	{
+		radius = sv_paint_detection_sphere_radius.GetFloat();
+	}
+
+	engine->TracePaintSurface( pBrushEntity->GetModel(), vEntitySpaceContactPoint, radius, color );
+
+	return GetAveragePaintColorFromVector( color );
+}

@@ -305,8 +305,9 @@ public:
 
 #ifndef CLIENT_DLL
 	int				GetMoveableOwnedEntities( CBaseEntity **pEntsOut, int iEntOutLimit ); //gets owned entities that aren't either world or static props. Excludes fake portal ents such as physics clones
-
+#endif
 	static CPortalSimulator *GetSimulatorThatOwnsEntity( const CBaseEntity *pEntity ); //fairly cheap to call
+#ifndef CLIENT_DLL
 	static CPortalSimulator *GetSimulatorThatCreatedPhysicsObject( const IPhysicsObject *pObject, PS_PhysicsObjectSourceType_t *pOut_SourceType = NULL );
 	static void			Pre_UTIL_Remove( CBaseEntity *pEntity );
 	static void			Post_UTIL_Remove( CBaseEntity *pEntity );

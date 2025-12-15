@@ -74,6 +74,17 @@ enum PortalChallengeType
 	PORTAL_CHALLENGE_TOTAL
 };
 
+enum PortalEvent_t // Not all of these events will be implemented in Retract
+{
+	PORTALEVENT_LINKED,					// This portal has linked to another portal and opened
+	PORTALEVENT_FIZZLE,					// Portal has fizzled 
+	PORTALEVENT_MOVED,					// Portal has moved its position
+	PORTALEVENT_ENTITY_TELEPORTED_TO,	// Entity (player or not) has teleported to this portal
+	PORTALEVENT_ENTITY_TELEPORTED_FROM,	// Entity (player or not) has teleported away from this portal
+	PORTALEVENT_PLAYER_TELEPORTED_TO,	// Player has teleported to this portal
+	PORTALEVENT_PLAYER_TELEPORTED_FROM,	// Player has teleported away from this portal
+};
+
 extern char *g_ppszPortalPassThroughMaterials[];
 
 #endif // PORTAL_SHAREDDEFS_H

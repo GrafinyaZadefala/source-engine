@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -9,11 +9,11 @@
 #include "BasePropDoor.h"
 #include "portal_player.h"
 #include "te_effect_dispatch.h"
-#include "gameinterface.h"
+#include "GameInterface.h"
 #include "prop_combine_ball.h"
 #include "portal_shareddefs.h"
 #include "triggers.h"
-#include "collisionutils.h"
+#include "CollisionUtils.h"
 #include "cbaseanimatingprojectile.h"
 #include "weapon_physcannon.h"
 #include "prop_portal_shared.h"
@@ -71,7 +71,6 @@ BEGIN_DATADESC( CWeaponPortalgun )
 END_DATADESC()
 
 LINK_ENTITY_TO_CLASS( weapon_portalgun, CWeaponPortalgun );
-PRECACHE_WEAPON_REGISTER(weapon_portalgun);
 
 
 extern ConVar sv_portal_placement_debug;
@@ -108,8 +107,11 @@ void CWeaponPortalgun::Activate()
 	if ( pPlayer )
 	{
 		CBaseEntity *pHeldObject = GetPlayerHeldEntity( pPlayer );
-		OpenProngs( ( pHeldObject ) ? ( false ) : ( true ) );
-		OpenProngs( ( pHeldObject ) ? ( true ) : ( false ) );
+		if ( pHeldObject )
+		{
+			OpenProngs( false );
+			OpenProngs( true );
+		}
 
 		if( GameRules()->IsMultiplayer() )
 			m_iPortalLinkageGroupID = pPlayer->entindex();
@@ -335,52 +337,59 @@ float CWeaponPortalgun::TraceFirePortal( bool bPortal2, const Vector &vTraceStar
 	UTIL_Portal_Trace_Filter( &baseFilter );
 	CTraceFilterTranslateClones traceFilterPortalShot( &baseFilter );
 
-	Ray_t rayEyeArea;
-	rayEyeArea.Init( vTraceStart + vDirection * 24.0f, vTraceStart + vDirection * -24.0f );
-
-	float fMustBeCloserThan = 2.0f;
-
-	CProp_Portal *pNearPortal = UTIL_Portal_FirstAlongRay( rayEyeArea, fMustBeCloserThan );
-
-	if ( !pNearPortal )
+	// RETRACT_PART2:
+	// If the player is in a tractor beam, then don't do the near portal check
+	// because it makes it hard to position the portal if it was slightly missplaced initially
+	CPortal_Player *pPlayer = (CPortal_Player*)GetPlayerOwner();
+	if ( !pPlayer || !pPlayer->GetTractorBeam() )
 	{
-		// Check for portal near and infront of you
-		rayEyeArea.Init( vTraceStart + vDirection * -24.0f, vTraceStart + vDirection * 48.0f );
+		Ray_t rayEyeArea;
+		rayEyeArea.Init( vTraceStart + vDirection * 24.0f, vTraceStart + vDirection * -24.0f );
 
-		fMustBeCloserThan = 2.0f;
+		float fMustBeCloserThan = 2.0f;
 
-		pNearPortal = UTIL_Portal_FirstAlongRay( rayEyeArea, fMustBeCloserThan );
-	}
+		CProp_Portal *pNearPortal = UTIL_Portal_FirstAlongRay( rayEyeArea, fMustBeCloserThan );
 
-	if ( pNearPortal && pNearPortal->IsActivedAndLinked() )
-	{
-		iPlacedBy = PORTAL_PLACED_BY_PEDESTAL;
-
-		Vector vPortalForward;
-		pNearPortal->GetVectors( &vPortalForward, 0, 0 );
-
-		if ( vDirection.Dot( vPortalForward ) < 0.01f )
+		if ( !pNearPortal )
 		{
-			// If shooting out of the world, fizzle
-			if ( !bTest )
+			// Check for portal near and infront of you
+			rayEyeArea.Init( vTraceStart + vDirection * -24.0f, vTraceStart + vDirection * 48.0f );
+
+			fMustBeCloserThan = 2.0f;
+
+			pNearPortal = UTIL_Portal_FirstAlongRay( rayEyeArea, fMustBeCloserThan );
+		}
+
+		if ( pNearPortal && pNearPortal->IsActivedAndLinked() )
+		{
+			iPlacedBy = PORTAL_PLACED_BY_PEDESTAL;
+
+			Vector vPortalForward;
+			pNearPortal->GetVectors( &vPortalForward, 0, 0 );
+
+			if ( vDirection.Dot( vPortalForward ) < 0.01f )
 			{
-				CProp_Portal *pPortal = CProp_Portal::FindPortal( m_iPortalLinkageGroupID, bPortal2, true );
+				// If shooting out of the world, fizzle
+				if ( !bTest )
+				{
+					CProp_Portal *pPortal = CProp_Portal::FindPortal( m_iPortalLinkageGroupID, bPortal2, true );
 
-				pPortal->m_iDelayedFailure = ( ( pNearPortal->m_bIsPortal2 ) ? ( PORTAL_FIZZLE_NEAR_RED ) : ( PORTAL_FIZZLE_NEAR_BLUE ) );
-				VectorAngles( vPortalForward, pPortal->m_qDelayedAngles );
-				pPortal->m_vDelayedPosition = pNearPortal->GetAbsOrigin();
+					pPortal->m_iDelayedFailure = ( ( pNearPortal->m_bIsPortal2 ) ? ( PORTAL_FIZZLE_NEAR_RED ) : ( PORTAL_FIZZLE_NEAR_BLUE ) );
+					VectorAngles( vPortalForward, pPortal->m_qDelayedAngles );
+					pPortal->m_vDelayedPosition = pNearPortal->GetAbsOrigin();
 
-				vFinalPosition = pPortal->m_vDelayedPosition;
-				qFinalAngles = pPortal->m_qDelayedAngles;
+					vFinalPosition = pPortal->m_vDelayedPosition;
+					qFinalAngles = pPortal->m_qDelayedAngles;
+
+					UTIL_TraceLine( vTraceStart - vDirection * 16.0f, vTraceStart + (vDirection * m_fMaxRange1), MASK_SHOT_PORTAL, &traceFilterPortalShot, &tr );
+
+					return PORTAL_ANALOG_SUCCESS_NEAR;
+				}
 
 				UTIL_TraceLine( vTraceStart - vDirection * 16.0f, vTraceStart + (vDirection * m_fMaxRange1), MASK_SHOT_PORTAL, &traceFilterPortalShot, &tr );
 
-				return PORTAL_ANALOG_SUCCESS_NEAR;
+				return PORTAL_ANALOG_SUCCESS_OVERLAP_LINKED;
 			}
-
-			UTIL_TraceLine( vTraceStart - vDirection * 16.0f, vTraceStart + (vDirection * m_fMaxRange1), MASK_SHOT_PORTAL, &traceFilterPortalShot, &tr );
-
-			return PORTAL_ANALOG_SUCCESS_OVERLAP_LINKED;
 		}
 	}
 

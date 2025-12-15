@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -18,7 +18,7 @@
 #include "portal_gamerules.h"
 #include "gamerules.h"
 #include "teamplay_gamerules.h"
-#include "entitylist.h"
+#include "EntityList.h"
 #include "physics.h"
 #include "game.h"
 #include "player_resource.h"
@@ -31,7 +31,6 @@
 
 void Host_Say( edict_t *pEdict, bool teamonly );
 
-extern CBaseEntity*	FindPickerEntityClass( CBasePlayer *pPlayer, char *classname );
 extern bool			g_fGameOver;
 
 /*
@@ -62,6 +61,9 @@ void ClientActive( edict_t *pEdict, bool bLoadGame )
 	}
 }
 
+void ClientFullyConnect(edict_t *pEntity)
+{
+}
 
 /*
 ===============
@@ -90,7 +92,7 @@ CBaseEntity* FindEntity( edict_t *pEdict, char *classname)
 	// If no name was given set bits based on the picked
 	if (FStrEq(classname,"")) 
 	{
-		return (FindPickerEntityClass( static_cast<CBasePlayer*>(GetContainingEntity(pEdict)), classname ));
+		return (static_cast<CBasePlayer*>(GetContainingEntity(pEdict))->FindPickerEntityClass( classname ));
 	}
 	return NULL;
 }

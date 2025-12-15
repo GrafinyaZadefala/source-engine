@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -52,7 +52,7 @@ CWeaponPortalgun::CWeaponPortalgun( void )
 	m_fMinRange2	= 0.0f;
 	m_fMaxRange2	= MAX_TRACE_LENGTH;
 
-	m_EffectState	= (int)EFFECT_NONE;
+	m_EffectState	= EFFECT_NONE;
 }
 
 void CWeaponPortalgun::Precache()
@@ -83,6 +83,8 @@ void CWeaponPortalgun::Precache()
 	PrecacheParticleSystem( "portal_2_projectile_stream_pedestal" );
 	PrecacheParticleSystem( "portal_1_charge" );
 	PrecacheParticleSystem( "portal_2_charge" );
+	
+	PrecacheEffect( "PortalBlast" );
 #endif
 }
 

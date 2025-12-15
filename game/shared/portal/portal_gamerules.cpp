@@ -188,6 +188,12 @@ static ConCommand ent_create_portal_metal_sphere("ent_create_portal_metal_sphere
 	//-----------------------------------------------------------------------------
 	CPortalGameRules::CPortalGameRules()
 	{
+#ifndef CLIENT_DLL
+		if ( !GlobalEntity_IsInTable( "player_regenerates_health" ) )
+			GlobalEntity_Add( MAKE_STRING("player_regenerates_health"), gpGlobals->mapname, GLOBAL_ON );
+		else
+			GlobalEntity_SetState( MAKE_STRING("player_regenerates_health"), GLOBAL_ON );
+#endif
 		m_bMegaPhysgun = false;
 		g_pCVar->FindVar( "sv_maxreplay" )->SetValue( "1.5" );
 	}
@@ -234,9 +240,9 @@ static ConCommand ent_create_portal_metal_sphere("ent_create_portal_metal_sphere
 		// --------------------------------------------------------------
 		// First initialize table so we can report missing relationships
 		// --------------------------------------------------------------
-		for (i=0;i<NUM_AI_CLASSES;i++)
+		for (i=0;i<LAST_SHARED_ENTITY_CLASS;i++)
 		{
-			for (j=0;j<NUM_AI_CLASSES;j++)
+			for (j=0;j<LAST_SHARED_ENTITY_CLASS;j++)
 			{
 				// By default all relationships are neutral of priority zero
 				CBaseCombatCharacter::SetDefaultRelationship( (Class_T)i, (Class_T)j, D_NU, 0 );
@@ -1199,7 +1205,7 @@ bool CPortalGameRules::ShouldBurningPropsEmitLight()
 //---------------------------------------------------------
 bool CPortalGameRules::ShouldRemoveRadio( void )
 {
-	IAchievement *pHeartbreaker = g_AchievementMgrPortal.GetAchievementByName( "PORTAL_BEAT_GAME" );
+	IAchievement *pHeartbreaker = g_AchievementMgrPortal.GetAchievementByName( "PORTAL_BEAT_GAME", 0 );
 	if ( pHeartbreaker && pHeartbreaker->IsAchieved() )
 		return true;
 
@@ -1265,7 +1271,7 @@ CAmmoDef *GetAmmoDef()
 		def.AddAmmoType("Grenade",			DMG_BURN,					TRACER_NONE,			"sk_plr_dmg_grenade",		"sk_npc_dmg_grenade",		"sk_max_grenade",		0, 0);
 		def.AddAmmoType("Thumper",			DMG_SONIC,					TRACER_NONE,			10, 10, 2, 0, 0 );
 		def.AddAmmoType("Gravity",			DMG_CLUB,					TRACER_NONE,			0,	0, 8, 0, 0 );
-		def.AddAmmoType("Battery",			DMG_CLUB,					TRACER_NONE,			0, 0, 0, 0, 0 );
+		def.AddAmmoType("Battery",			DMG_CLUB,					TRACER_NONE,			NULL, NULL, NULL, 0, 0 );
 		def.AddAmmoType("GaussEnergy",		DMG_SHOCK,					TRACER_NONE,			"sk_jeep_gauss_damage",		"sk_jeep_gauss_damage", "sk_max_gauss_round", BULLET_IMPULSE(650, 8000), 0 ); // hit like a 10kg weight at 400 in/s
 		def.AddAmmoType("CombineCannon",	DMG_BULLET,					TRACER_LINE,			"sk_npc_dmg_gunship_to_plr", "sk_npc_dmg_gunship", NULL, 1.5 * 750 * 12, 0 ); // hit like a 1.5kg weight at 750 ft/s
 		def.AddAmmoType("AirboatGun",		DMG_AIRBOAT,				TRACER_LINE,			"sk_plr_dmg_airboat",		"sk_npc_dmg_airboat",		NULL,					BULLET_IMPULSE(10, 600), 0 );

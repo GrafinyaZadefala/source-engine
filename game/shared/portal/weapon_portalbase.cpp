@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -22,10 +22,10 @@ extern IVModelInfo* modelinfo;
 #if defined( CLIENT_DLL )
 
 	#include "vgui/ISurface.h"
-	#include "vgui_controls/Controls.h"
+	#include "vgui_controls/controls.h"
 	#include "c_portal_player.h"
 	#include "hud_crosshair.h"
-	#include "PortalRender.h"
+	#include "portalrender.h"
 
 #else
 
@@ -147,12 +147,16 @@ void CWeaponPortalBase::OnDataChanged( DataUpdateType_t type )
 		ShutdownPredictable();
 }
 
-int CWeaponPortalBase::DrawModel( int flags )
+int CWeaponPortalBase::DrawModel( int flags, const RenderableInstance_t &instance )
 {
+	//return BaseClass::DrawModel( flags, instance );
+
 	if ( !m_bReadyToDraw )
 		return 0;
 
-	if ( GetOwner() && (GetOwner() == C_BasePlayer::GetLocalPlayer()) && !g_pPortalRender->IsRenderingPortal() && !C_BasePlayer::ShouldDrawLocalPlayer() )
+	C_BasePlayer *pLocalPlayer = C_BasePlayer::GetLocalPlayer();
+
+	if ( GetOwner() && (GetOwner() == pLocalPlayer) && !g_pPortalRender->IsRenderingPortal() && !pLocalPlayer->ShouldDrawLocalPlayer() )
 		return 0;
 
 	//Sometimes the return value of ShouldDrawLocalPlayer() fluctuates too often to draw the correct model all the time, so this is a quick fix if it's changed too fast
@@ -166,7 +170,7 @@ int CWeaponPortalBase::DrawModel( int flags )
 		bChangeModelBack = true;
 	}
 
-	int iRetVal = BaseClass::DrawModel( flags );
+	int iRetVal = BaseClass::DrawModel( flags, instance );
 
 	if( bChangeModelBack )
 		SetModelIndex( iOriginalIndex );
@@ -176,6 +180,7 @@ int CWeaponPortalBase::DrawModel( int flags )
 
 bool CWeaponPortalBase::ShouldDraw( void )
 {
+#if 0
 	if ( !GetOwner() || GetOwner() != C_BasePlayer::GetLocalPlayer() )
 		return true;
 
@@ -186,6 +191,9 @@ bool CWeaponPortalBase::ShouldDraw( void )
 	//	return false;
 
 	return true;
+#else
+	return BaseClass::ShouldDraw();
+#endif
 }
 
 bool CWeaponPortalBase::ShouldPredict()
@@ -205,7 +213,7 @@ void CWeaponPortalBase::DrawCrosshair()
 	if ( !player )
 		return;
 
-	Color clr = gHUD.m_clrNormal;
+	Color clr = GetHud().m_clrNormal;
 
 	CHudCrosshair *crosshair = GET_HUDELEMENT( CHudCrosshair );
 	if ( !crosshair )
@@ -214,14 +222,14 @@ void CWeaponPortalBase::DrawCrosshair()
 	// Check to see if the player is in VGUI mode...
 	if (player->IsInVGuiInputMode())
 	{
-		CHudTexture *pArrow	= gHUD.GetIcon( "arrow" );
+		CHudTexture *pArrow	= HudIcons().GetIcon( "arrow" );
 
-		crosshair->SetCrosshair( pArrow, gHUD.m_clrNormal );
+		crosshair->SetCrosshair( pArrow, GetHud().m_clrNormal );
 		return;
 	}
 
 	// Find out if this weapon's auto-aimed onto a target
-	bool bOnTarget = ( m_iState == WEAPON_IS_ONTARGET );
+	bool bOnTarget = ( m_iState == WEAPON_IS_ACTIVE ) && player->m_fOnTarget;
 
 	if ( player->GetFOV() >= 90 )
 	{ 
@@ -399,7 +407,7 @@ void CWeaponPortalBase::FireBullets( const FireBulletsInfo_t &info )
 {
 	FireBulletsInfo_t modinfo = info;
 
-	modinfo.m_iPlayerDamage = GetPortalWpnData().m_iPlayerDamage;
+	modinfo.m_flPlayerDamage = GetPortalWpnData().m_iPlayerDamage;
 
 	BaseClass::FireBullets( modinfo );
 }

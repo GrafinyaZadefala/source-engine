@@ -23,6 +23,9 @@ class CPortal_Player;
 #include "in_buttons.h"
 #include "func_liquidportal.h"
 #include "ai_speech.h"			// For expresser host
+#include "paint_power_user.h"
+#include "paintable_entity.h"
+#include "trigger_tractorbeam.h"
 
 struct PortalPlayerStatistics_t
 {
@@ -34,11 +37,10 @@ struct PortalPlayerStatistics_t
 //=============================================================================
 // >> Portal_Player
 //=============================================================================
-class CPortal_Player : public CAI_ExpresserHost<CHL2_Player> 
+class CPortal_Player : public PaintPowerUser< CPaintableEntity< CAI_ExpresserHost<CHL2_Player> > >
 {
 public:
-	DECLARE_CLASS( CPortal_Player, CHL2_Player );
-
+	DECLARE_CLASS( CPortal_Player, PaintPowerUser< CPaintableEntity< CAI_ExpresserHost<CHL2_Player> > > );
 	CPortal_Player();
 	~CPortal_Player( void );
 	
@@ -105,6 +107,7 @@ public:
 	virtual void PlayerUse( void );
 	//virtual bool StartObserverMode( int mode );
 	virtual void GetStepSoundVelocities( float *velwalk, float *velrun );
+	virtual void SetStepSoundTime( stepsoundtimes_t iStepSoundTime, bool bWalking );
 	virtual void PlayStepSound( Vector &vecOrigin, surfacedata_t *psurface, float fvol, bool force );
 	virtual void UpdateOnRemove( void );
 
@@ -138,11 +141,13 @@ public:
 	inline void ForceJumpThisFrame( void ) { ForceButtons( IN_JUMP ); }
 
 	void DoAnimationEvent( PlayerAnimEvent_t event, int nData );
-	void SetupBones( matrix3x4_t *pBoneToWorld, int boneMask );
+	void SetupBones( matrix3x4a_t *pBoneToWorld, int boneMask );
 
 	// physics interactions
 	virtual void PickupObject(CBaseEntity *pObject, bool bLimitMassAndSize );
 	virtual void ForceDropOfCarriedPhysObjects( CBaseEntity *pOnlyIfHoldingThis );
+	
+	virtual	bool ShouldCollide( int collisionGroup, int contentsMask ) const OVERRIDE;
 
 	void ToggleHeldObjectOnOppositeSideOfPortal( void ) { m_bHeldObjectOnOppositeSideOfPortal = !m_bHeldObjectOnOppositeSideOfPortal; }
 	void SetHeldObjectOnOppositeSideOfPortal( bool p_bHeldObjectOnOppositeSideOfPortal ) { m_bHeldObjectOnOppositeSideOfPortal = p_bHeldObjectOnOppositeSideOfPortal; }
@@ -164,9 +169,6 @@ public:
 
 	void SetNeuroToxinDamageTime( float fCountdownSeconds ) { m_fNeuroToxinDamageTime = gpGlobals->curtime + fCountdownSeconds; }
 
-	void IncNumCamerasDetatched( void ) { ++m_iNumCamerasDetatched; }
-	int GetNumCamerasDetatched( void ) const { return m_iNumCamerasDetatched; }
-
 	Vector m_vecTotalBulletForce;	//Accumulator for bullet force in a single frame
 
 	bool m_bSilentDropAndPickup;
@@ -175,7 +177,9 @@ public:
 	CNetworkHandle( CBaseEntity, m_hRagdoll );	// networked entity handle
 
 	void SuppressCrosshair( bool bState ) { m_bSuppressingCrosshair = bState; }
-		
+	
+	void TestPortalTouch( void );
+
 private:
 
 	virtual CAI_Expresser* CreateExpresser( void );
@@ -197,15 +201,10 @@ private:
 	bool m_bIntersectingPortalPlane;
 	bool m_bStuckOnPortalCollisionObject;
 
-	float m_fTimeLastHurt;
-	bool  m_bIsRegenerating;		// Is the player currently regaining health
-
 	float m_fNeuroToxinDamageTime;
 
 	PortalPlayerStatistics_t m_StatsThisLevel;
 	float m_fTimeLastNumSecondsUpdate;
-
-	int		m_iNumCamerasDetatched;
 
 	QAngle						m_qPrePortalledViewAngles;
 	bool						m_bFixEyeAnglesFromPortalling;
@@ -214,14 +213,19 @@ private:
 	string_t					m_iszExpressionScene;
 	EHANDLE						m_hExpressionSceneEnt;
 	float						m_flExpressionLoopTime;
-
 	
+	CNetworkHandle( CTrigger_TractorBeam, m_hTractorBeam )
+    int m_nTractorBeamCount;
 
 	mutable Vector m_vWorldSpaceCenterHolder; //WorldSpaceCenter() returns a reference, need an actual value somewhere
 
-
+	Vector m_vPrevGroundNormal; // Our ground normal from the previous frame
 
 public:
+	
+	Vector GetPaintGunShootPosition();
+
+	bool m_bCatapulted;
 
 	CNetworkVar( bool, m_bPitchReorientation );
 	CNetworkHandle( CProp_Portal, m_hPortalEnvironment ); //if the player is in a portal environment, this is the associated portal
@@ -229,12 +233,100 @@ public:
 
 	friend class CProp_Portal;
 
+	// PAINT POWER STATE
+	PaintPowerInfo_t m_CachedJumpPower;
+	Vector m_vInputVector;
+	float m_flCachedJumpPowerTime;
+	float m_flSpeedDecelerationTime;
+	float m_flPredictedJumpTime;
+	float m_flLastSuppressedBounceTime;
+	
+	CNetworkVar( InAirState, m_InAirState );
+	CNetworkVar( PaintPowerType, m_PaintedPowerType );
+	CNetworkVector( m_vPreUpdateVelocity );
+	CNetworkVar( bool, m_bJumpedThisFrame );
+	CNetworkVar( bool, m_bBouncedThisFrame );
+	CNetworkVar( float, m_fBouncedTime );
+	CountdownTimer m_PaintedPowerTimer;
+	CachedPaintPowerChoiceResult m_CachedPaintPowerChoiceResults[PAINT_POWER_TYPE_COUNT];
 
 #ifdef PORTAL_MP
 public:
 	virtual CBaseEntity* EntSelectSpawnPoint( void );
 	void PickTeam( void );
 #endif
+	
+	void SetInTractorBeam( CTrigger_TractorBeam *pTractorBeam );
+	void SetLeaveTractorBeam( CTrigger_TractorBeam *pTractorBeam, bool bKeepFloating );
+	CTrigger_TractorBeam* GetTractorBeam( void ) const { return m_hTractorBeam.Get(); }
+	
+	const Vector& GetPrevGroundNormal() const;
+	void SetPrevGroundNormal( const Vector& vPrevNormal );
+
+public: // Paint
+
+	void OnBounced( float fTimeOffset = 0.0f );
+
+	virtual void ChooseActivePaintPowers( PaintPowerInfoVector& activePowers );
+	
+	using BaseClass::AddSurfacePaintPowerInfo;
+	void AddSurfacePaintPowerInfo( const BrushContact& contact, char const* context = 0 );
+	void AddSurfacePaintPowerInfo( const trace_t& trace, char const* context = 0 );
+
+	// Find all the contacts
+	void DeterminePaintContacts();
+	void PredictPaintContacts( const Vector& contactBoxMin,
+		const Vector& contactBoxMax,
+		const Vector& traceBoxMin,
+		const Vector& traceBoxMax,
+		float lookAheadTime,
+		char const* context );
+	void ChooseBestPaintPowersInRange( PaintPowerChoiceResultArray& bestPowers,
+		PaintPowerConstIter begin,
+		PaintPowerConstIter end,
+		const PaintPowerChoiceCriteria_t& info ) const;
+
+	// Paint Power User Implementation
+	virtual PaintPowerState ActivateSpeedPower( PaintPowerInfo_t& powerInfo );
+	virtual PaintPowerState UseSpeedPower( PaintPowerInfo_t& powerInfo );
+	virtual PaintPowerState DeactivateSpeedPower( PaintPowerInfo_t& powerInfo );
+
+	virtual PaintPowerState ActivateBouncePower( PaintPowerInfo_t& powerInfo );
+	virtual PaintPowerState UseBouncePower( PaintPowerInfo_t& powerInfo );
+	virtual PaintPowerState DeactivateBouncePower( PaintPowerInfo_t& powerInfo );
+
+	//void PlayPaintSounds( const PaintPowerChoiceResultArray& touchedPowers );
+	void UpdatePaintedPower();
+	void UpdateAirInputScaleFadeIn();
+	void UpdateInAirState();
+	void CachePaintPowerChoiceResults( const PaintPowerChoiceResultArray& choiceInfo );
+	bool LateSuperJumpIsValid() const;
+
+	virtual PaintPowerType GetPaintPowerAtPoint( const Vector& worldContactPt ) const;
+	virtual void Paint( PaintPowerType type, const Vector& worldContactPt );
+	virtual void CleansePaint();
+
+	// Paint power debug
+	void DrawJumpHelperDebug( PaintPowerConstIter begin, PaintPowerConstIter end, float duration, bool noDepthTest, const PaintPowerInfo_t* pSelected ) const;
+
+	float SpeedPaintAcceleration( float flDefaultMaxSpeed,
+								  float flSpeed,
+								  float flWishCos,
+								  float flWishDirSpeed ) const;
+
+	bool CheckToUseBouncePower( PaintPowerInfo_t& info );
+
+	bool IsPressingJumpKey() const;
+	bool IsHoldingJumpKey() const;
+	bool IsTryingToSuperJump( const PaintPowerInfo_t* pInfo = NULL ) const;
+	void SetJumpedThisFrame( bool jumped );
+	bool JumpedThisFrame() const;
+	void SetBouncedThisFrame( bool bounced );
+	bool BouncedThisFrame() const;
+	InAirState GetInAirState() const;
+
+	const Vector& GetInputVector() const;
+	void SetInputVector( const Vector& vInput );
 };
 
 inline CPortal_Player *ToPortalPlayer( CBaseEntity *pEntity )
@@ -242,7 +334,15 @@ inline CPortal_Player *ToPortalPlayer( CBaseEntity *pEntity )
 	if ( !pEntity || !pEntity->IsPlayer() )
 		return NULL;
 
-	return dynamic_cast<CPortal_Player*>( pEntity );
+	return static_cast<CPortal_Player*>( pEntity );
+}
+
+inline const CPortal_Player *ToPortalPlayer( const CBaseEntity *pEntity )
+{
+	if ( !pEntity || !pEntity->IsPlayer() )
+		return NULL;
+
+	return static_cast<const CPortal_Player*>( pEntity );
 }
 
 inline CPortal_Player *GetPortalPlayer( int iPlayerIndex )

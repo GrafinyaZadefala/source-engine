@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2005, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -8,9 +8,6 @@
 #include "usermessages.h"
 #include "shake.h"
 #include "voice_gamemgr.h"
-
-// NVNT include to register in haptic user messages
-#include "haptics/haptic_msgs.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -50,15 +47,19 @@ void RegisterUserMessages()
 
 	//new stuff for portal
 	usermessages->Register( "EntityPortalled", sizeof( long ) + sizeof( long ) + sizeof( Vector ) + sizeof( QAngle ) ); //something got teleported through a portal
-	usermessages->Register( "KillCam", -1 );
+	usermessages->Register( "KillCam", -1 );	
 
-	// Voting
-	usermessages->Register( "CallVoteFailed", 1 );
-	usermessages->Register( "VoteStart", -1 );
-	usermessages->Register( "VotePass", -1 );
-	usermessages->Register( "VoteFailed", 2 );
-	usermessages->Register( "VoteSetup", -1 );  // Initiates client-side voting UI
-
-	// NVNT register haptic user messages
-	RegisterHapticMessages();
+	// Swarm Stuff:
+	usermessages->Register( "CloseCaptionDirect", -1 ); // Show a forced caption (by string id number)(duration in 10th of a second)
+	usermessages->Register( "CurrentTimescale", 4 );	// Send one float for the new timescale
+	usermessages->Register( "DesiredTimescale", 13 );	// Send timescale and some blending vars
+	
+	// Paint messages
+	usermessages->Register( "PaintWorld", -1 );
+	usermessages->Register( "PaintEntity", sizeof( long ) + sizeof( uint8 ) + sizeof( Vector ) );
+	usermessages->Register( "ChangePaintColor", sizeof( long ) + sizeof( uint8 ) );
+	usermessages->Register( "PaintBombExplode", sizeof( Vector ) + sizeof( uint8 ) + sizeof( uint8 ) + sizeof( BYTE ) );
+	usermessages->Register( "RemoveAllPaint", 0 );
+	usermessages->Register( "PaintAllSurfaces", sizeof( BYTE ) );
+	usermessages->Register( "RemovePaint", sizeof( long ) );
 }

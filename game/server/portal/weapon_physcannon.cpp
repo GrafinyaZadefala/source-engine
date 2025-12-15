@@ -45,7 +45,7 @@
 #include "rumble_shared.h"
 #include "gamestats.h"
 // NVNT haptic utils
-#include "haptics/haptic_utils.h"
+#include "collisionutils.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -67,6 +67,12 @@ ConVar physcannon_ball_cone( "physcannon_ball_cone", "0.997" );
 ConVar physcannon_punt_cone( "physcannon_punt_cone", "0.997" );
 ConVar player_throwforce( "player_throwforce", "1000" );
 ConVar physcannon_dmg_glass( "physcannon_dmg_glass", "15" );
+
+// Portal 2
+ConVar player_held_object_transform_bump_ray( "player_held_object_transform_bump_ray", "0", FCVAR_REPLICATED | FCVAR_CHEAT );
+ConVar player_hold_object_in_column( "player_hold_object_in_column", "1", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY, "Hold object along a fixed column in front of player\n" );
+ConVar player_hold_column_max_size( "player_hold_column_max_size", "96", FCVAR_REPLICATED | FCVAR_DEVELOPMENTONLY, "Furthest distance an object can be when held in colmn mode." );
+//ConVar player_held_object_collide_with_player( "player_held_object_collide_with_player", "0", FCVAR_REPLICATED | FCVAR_CHEAT, "Should held objects collide with players" );
 
 extern ConVar hl2_normspeed;
 extern ConVar hl2_walkspeed;
@@ -280,6 +286,22 @@ void UTIL_PhyscannonTraceHull( const Vector &vecAbsStart, const Vector &vecAbsEn
 	}
 }
 
+bool HeldObjectShouldHitPlayer( CPortal_Player *pPlayer )
+{
+	if ( gpGlobals->maxClients != 1 )
+		return false;
+
+	if ( !strcmp( gpGlobals->mapname.ToCStr(), "pr_15" ) ) // This sucks
+	{
+		return false;
+	}
+
+	if ( pPlayer->m_bCatapulted || (pPlayer->GetAbsVelocity().Length() > 300) )
+		return false;
+
+	return true;
+}
+
 static void MatrixOrthogonalize( matrix3x4_t &matrix, int column )
 {
 	Vector columns[3];
@@ -469,10 +491,11 @@ public:
 	CGrabController( void );
 	~CGrabController( void );
 	void AttachEntity( CBasePlayer *pPlayer, CBaseEntity *pEntity, IPhysicsObject *pPhys, bool bIsMegaPhysCannon, const Vector &vGrabPosition, bool bUseGrabPosition );
-	void DetachEntity( bool bClearVelocity );
+	bool DetachEntity( bool bClearVelocity );
 	void OnRestore();
 
 	bool UpdateObject( CBasePlayer *pPlayer, float flError );
+	bool UpdateObjectPortal2( CBasePlayer *pPlayer, float flError );
 
 	void SetTargetPosition( const Vector &target, const QAngle &targetOrientation );
 	void GetTargetPosition( Vector *target, QAngle *targetOrientation );
@@ -520,12 +543,14 @@ private:
 	IPhysicsMotionController *m_controller;
 
 	// NVNT player controlling this grab controller
-	CBasePlayer*	m_pControllingPlayer;
+	CHandle<CPortal_Player>	m_hControllingPlayer;
 
 	bool			m_bAllowObjectOverhead; // Can the player hold this object directly overhead? (Default is NO)
 
 	//set when a held entity is penetrating another through a portal. Needed for special fixes
 	EHANDLE			m_PenetratedEntity;
+
+	int m_prePickupCollisionGroup;
 
 	friend class CWeaponPhysCannon;
 	friend void GetSavedParamsForCarriedPhysObject( CGrabController *pGrabController, IPhysicsObject *pObject, float *pSavedMassOut, float *pSavedRotationalDampingOut );
@@ -552,6 +577,8 @@ BEGIN_SIMPLE_DATADESC( CGrabController )
 	DEFINE_FIELD( m_attachedAnglesPlayerSpace, FIELD_VECTOR ),
 	DEFINE_FIELD( m_attachedPositionObjectSpace, FIELD_VECTOR ),
 	DEFINE_FIELD( m_bAllowObjectOverhead, FIELD_BOOLEAN ),
+	DEFINE_FIELD( m_prePickupCollisionGroup, FIELD_INTEGER ),
+	DEFINE_FIELD( m_hControllingPlayer, FIELD_EHANDLE ),
 
 	// Physptrs can't be inside embedded classes
 	// DEFINE_PHYSPTR( m_controller ),
@@ -576,8 +603,8 @@ CGrabController::CGrabController( void )
 	m_vecPreferredCarryAngles = vec3_angle;
 	m_bHasPreferredCarryAngles = false;
 	m_flDistanceOffset = 0;
-	// NVNT constructing m_pControllingPlayer to NULL
-	m_pControllingPlayer = NULL;
+	// NVNT constructing m_hControllingPlayer to NULL
+	m_hControllingPlayer = NULL;
 }
 
 CGrabController::~CGrabController( void )
@@ -597,8 +624,12 @@ void CGrabController::SetTargetPosition( const Vector &target, const QAngle &tar
 {
 	m_shadow.targetPosition = target;
 	m_shadow.targetRotation = targetOrientation;
-
+	
+#if defined ( CLIENT_DLL )
 	m_timeToArrive = gpGlobals->frametime;
+#else
+	m_timeToArrive = UTIL_GetSimulationInterval();
+#endif
 
 	CBaseEntity *pAttached = GetAttached();
 	if ( pAttached )
@@ -697,6 +728,36 @@ float CGrabController::ComputeError()
 		if ( UTIL_IntersectRayWithPortal( rayPortalTest, pPortalPlayer->GetHeldObjectPortal() ) < 0.0f )
 		{
 			m_error *= 2.5f;
+		}
+	}
+
+	// If we've given ourselves extra error distance to allow object-player penetration,
+	// multiply that error if some obstruction gets in between the player and the object
+	if ( !HeldObjectShouldHitPlayer( pPortalPlayer ) )
+	{
+		trace_t tr;
+		Ray_t ray;
+		CTraceFilterSkipTwoEntities traceFilter( pPortalPlayer, pAttached, COLLISION_GROUP_NONE );
+		Vector vObjectCenter = pAttached->GetAbsOrigin();
+		if ( pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
+		{
+			Assert ( pPortalPlayer->GetHeldObjectPortal() && pPortalPlayer->GetHeldObjectPortal()->m_hLinkedPortal );
+			if ( pPortalPlayer->GetHeldObjectPortal() && pPortalPlayer->GetHeldObjectPortal()->m_hLinkedPortal  )
+			{
+				Vector tmp;
+				UTIL_Portal_PointTransform( pPortalPlayer->GetHeldObjectPortal()->m_hLinkedPortal->MatrixThisToLinked(), vObjectCenter, tmp ); 	
+				vObjectCenter = tmp;
+			}
+		}
+		ray.Init( pPortalPlayer->EyePosition(), vObjectCenter );
+		UTIL_Portal_TraceRay( ray, MASK_SOLID, &traceFilter, &tr, false );
+		if ( tr.DidHit() )
+		{
+			m_error *= 3.0f;
+			//if ( player_held_object_debug_error.GetBool() )
+			//{
+			//	engine->Con_NPrintf( 23, "Multiplying error from obstruction" );
+			//}
 		}
 	}
 
@@ -886,8 +947,8 @@ void CGrabController::AttachEntity( CBasePlayer *pPlayer, CBaseEntity *pEntity, 
 		pList[i]->SetDamping( NULL, &damping );
 	}
 
-	// NVNT setting m_pControllingPlayer to the player attached
-	m_pControllingPlayer = pPlayer;
+	// NVNT setting m_hControllingPlayer to the player attached
+	m_hControllingPlayer = pPortalPlayer;
 	
 	// Give extra mass to the phys object we're actually picking up
 	pPhys->SetMass( REDUCED_CARRY_MASS );
@@ -927,6 +988,13 @@ void CGrabController::AttachEntity( CBasePlayer *pPlayer, CBaseEntity *pEntity, 
 	}
 
 	m_bAllowObjectOverhead = IsObjectAllowedOverhead( pEntity );
+	
+	m_prePickupCollisionGroup = pEntity->GetCollisionGroup();
+
+	if ( !HeldObjectShouldHitPlayer( pPortalPlayer ) )
+	{
+		pEntity->SetCollisionGroup( COLLISION_GROUP_PLAYER_HELD );
+	}
 }
 
 static void ClampPhysicsVelocity( IPhysicsObject *pPhys, float linearLimit, float angularLimit )
@@ -942,13 +1010,31 @@ static void ClampPhysicsVelocity( IPhysicsObject *pPhys, float linearLimit, floa
 	angVel *= angSpeed;
 	pPhys->AddVelocity( &vel, &angVel );
 }
-
-void CGrabController::DetachEntity( bool bClearVelocity )
+bool TestIntersectionVsHeldObjectCollide( CBaseEntity *pHeldObject, Vector vHeldObjectTestOrigin, CBaseEntity *pOther );
+bool CGrabController::DetachEntity( bool bClearVelocity )
 {
 	Assert(!PhysIsInCallback());
 	CBaseEntity *pEntity = GetAttached();
 	if ( pEntity )
 	{
+#if 0
+		CPortal_Player *pPortalPlayer = ToPortalPlayer( m_hControllingPlayer );
+		// If we're not colliding with the player, refuse to drop when penetrating a player.
+		// (or anything else... trusting FindSafePlacementLocation to not give false positives.. 
+		// if this isn't the case we can change it to a straight object vs player check)
+		if ( !HeldObjectShouldHitPlayer( pPortalPlayer ) )
+		{
+			if ( pPortalPlayer && !pPortalPlayer->m_bSilentDropAndPickup )
+			{
+				//if ( TestIntersectionVsHeldObjectCollide( pEntity, pEntity->GetAbsOrigin(), m_hControllingPlayer ) )
+				//	return false;
+			}
+		}
+#endif
+		
+		// Also, restore the original collision group
+		pEntity->SetCollisionGroup( m_prePickupCollisionGroup );
+
 		// Restore the LS blocking state
 		pEntity->SetBlocksLOS( m_bCarriedEntityBlocksLOS );
 		IPhysicsObject *pList[VPHYSICS_MAX_OBJECT_LIST_COUNT];
@@ -980,6 +1066,7 @@ void CGrabController::DetachEntity( bool bClearVelocity )
 	m_attachedEntity = NULL;
 	physenv->DestroyMotionController( m_controller );
 	m_controller = NULL;
+	return true;
 }
 
 static bool InContactWithHeavyObject( IPhysicsObject *pObject, float heavyMass )
@@ -1013,7 +1100,7 @@ IMotionEvent::simresult_e CGrabController::Simulate( IPhysicsMotionController *p
 	}
 	shadowParams.maxAngular = m_shadow.maxAngular * m_contactAmount * m_contactAmount * m_contactAmount;
 	m_timeToArrive = pObject->ComputeShadowControl( shadowParams, m_timeToArrive, deltaTime );
-	
+
 	// Slide along the current contact points to fix bouncing problems
 	Vector velocity;
 	AngularImpulse angVel;
@@ -1079,6 +1166,88 @@ bool CGrabController::IsObjectAllowedOverhead( CBaseEntity *pEntity )
 void CGrabController::SetPortalPenetratingEntity( CBaseEntity *pPenetrated )
 {
 	m_PenetratedEntity = pPenetrated;
+}
+
+struct collidelist_t
+{
+	const CPhysCollide	*pCollide;
+	Vector			origin;
+	QAngle			angles;
+};
+
+// TODO: Blatantly stolen from triggers.cpp... should peel this out into an engine feature
+bool TestIntersectionVsHeldObjectCollide( CBaseEntity *pHeldObject, Vector vHeldObjectTestOrigin, CBaseEntity *pOther )
+{
+	if ( !pHeldObject || !pOther || !pHeldObject->VPhysicsGetObject() || !pOther->CollisionProp() )
+	{
+		return false;
+	}
+
+	switch ( pOther->GetSolid() )
+	{
+	case SOLID_BBOX:
+		{
+			ICollideable *pCollide = pHeldObject->CollisionProp();
+			Ray_t ray;
+			trace_t tr;
+			ray.Init( pOther->GetAbsOrigin(), pOther->GetAbsOrigin(), pOther->WorldAlignMins(), pOther->WorldAlignMaxs() );
+			enginetrace->ClipRayToCollideable( ray, MASK_SOLID, pCollide, &tr );
+
+			if ( tr.startsolid )
+				return true;
+		}
+		break;
+	case SOLID_BSP:
+	case SOLID_VPHYSICS:
+		{
+			CPhysCollide *pHeldObjectVCollide = modelinfo->GetVCollide( pHeldObject->GetModelIndex() )->solids[0];
+			Assert( pHeldObjectVCollide );
+
+			CUtlVector<collidelist_t> collideList;
+			IPhysicsObject *pList[VPHYSICS_MAX_OBJECT_LIST_COUNT];
+			int physicsCount = pHeldObject->VPhysicsGetObjectList( pList, ARRAYSIZE(pList) );
+			if ( physicsCount )
+			{
+				for ( int i = 0; i < physicsCount; i++ )
+				{
+					const CPhysCollide *pCollide = pList[i]->GetCollide();
+					if ( pCollide )
+					{
+						collidelist_t element;
+						element.pCollide = pCollide;
+						pList[i]->GetPosition( &element.origin, &element.angles );
+						element.origin = element.origin - pHeldObject->GetAbsOrigin() + vHeldObjectTestOrigin;
+						collideList.AddToTail( element );
+					}
+				}
+			}
+			else
+			{
+				vcollide_t *pVCollide = modelinfo->GetVCollide( pHeldObject->GetModelIndex() );
+				if ( pVCollide && pVCollide->solidCount )
+				{
+					collidelist_t element;
+					element.pCollide = pVCollide->solids[0];
+					element.origin = vHeldObjectTestOrigin;
+					element.angles = pHeldObject->GetAbsAngles();
+					collideList.AddToTail( element );
+				}
+			}
+			for ( int i = collideList.Count()-1; i >= 0; --i )
+			{
+				const collidelist_t &element = collideList[i];
+				trace_t tr;
+				physcollision->TraceCollide( element.origin, element.origin, element.pCollide, element.angles, pHeldObjectVCollide, vHeldObjectTestOrigin, pHeldObject->GetAbsAngles(), &tr );
+				if ( tr.startsolid )
+					return true;
+			}
+		}
+		break;
+
+	default:
+		return false;
+	}
+	return false;
 }
 
 //-----------------------------------------------------------------------------
@@ -1176,10 +1345,7 @@ void CPlayerPickupController::Init( CBasePlayer *pPlayer, CBaseEntity *pObject )
 	}
 	
 	m_grabController.AttachEntity( pPlayer, pObject, pPhysics, false, vec3_origin, false );
-#ifdef WIN32
-	// NVNT apply a downward force to simulate the mass of the held object.
-	HapticSetConstantForce(m_pPlayer,clamp(m_grabController.GetLoadWeight()*0.1,1,6)*Vector(0,-1,0));
-#endif	
+
 	m_pPlayer->m_Local.m_iHideHUD |= HIDEHUD_WEAPONSELECTION;
 	m_pPlayer->SetUseEntity( this );
 }
@@ -1200,11 +1366,7 @@ void CPlayerPickupController::Shutdown( bool bThrown )
 	}
 
 	m_grabController.DetachEntity( bClearVelocity );
-#ifdef WIN32
-	// NVNT if we have a player, issue a zero constant force message
-	if(m_pPlayer)
-		HapticSetConstantForce(m_pPlayer,Vector(0,0,0));
-#endif
+
 	if ( pObject != NULL )
 	{
 		if ( !ToPortalPlayer( m_pPlayer )->m_bSilentDropAndPickup )
@@ -1260,7 +1422,8 @@ void CPlayerPickupController::Use( CBaseEntity *pActivator, CBaseEntity *pCaller
 
 		// UNDONE: Use vphysics stress to decide to drop objects
 		// UNDONE: Must fix case of forcing objects into the ground you're standing on (causes stress) before that will work
-		if ( !pAttached || useType == USE_OFF || (m_pPlayer->m_nButtons & IN_ATTACK2) || m_grabController.ComputeError() > 12 )
+		float flMaxError = ( HeldObjectShouldHitPlayer( (CPortal_Player*)pActivator ) ) ? ( 12 ) : ( 9999 ); // Some magic numbers here... what we want to allow is the object moving from the desired position into the player before we start trying to break the hold 
+		if ( !pAttached || useType == USE_OFF || (m_pPlayer->m_nButtons & IN_ATTACK2) || m_grabController.ComputeError() > flMaxError )
 		{
 			Shutdown();
 			return;
@@ -2568,10 +2731,6 @@ bool CWeaponPhysCannon::AttachObject( CBaseEntity *pObject, const Vector &vPosit
 
 	if( pOwner )
 	{
-#ifdef WIN32
-		// NVNT set the players constant force to simulate holding mass
-		HapticSetConstantForce(pOwner,clamp(m_grabController.GetLoadWeight()*0.05,1,5)*Vector(0,-1,0));
-#endif
 		pOwner->EnableSprint( false );
 
 		float	loadWeight = ( 1.0f - GetLoadPercentage() );
@@ -2860,7 +3019,8 @@ CBaseEntity *CWeaponPhysCannon::FindObjectInCone( const Vector &vecOrigin, const
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 bool CGrabController::UpdateObject( CBasePlayer *pPlayer, float flError )
-{
+{	
+	//return UpdateObjectPortal2( pPlayer, flError );
 	CBaseEntity *pPenetratedEntity = m_PenetratedEntity.Get();
 	if( pPenetratedEntity )
 	{
@@ -3065,6 +3225,17 @@ bool CGrabController::UpdateObject( CBasePlayer *pPlayer, float flError )
 	Vector offset;
 	AngleMatrix( angles, attachedToWorld );
 	VectorRotate( m_attachedPositionObjectSpace, attachedToWorld, offset );
+	
+	//if the player is moving pretty fast. Start moving the object more towards where they're going to be instead of where they are.
+	if ( !HeldObjectShouldHitPlayer( pPortalPlayer ) )
+	{
+		Vector vCurrentOffsetDirection = end - pPlayer->WorldSpaceCenter();
+		vCurrentOffsetDirection.NormalizeInPlace();
+
+		Vector vSpeedAddon = pPlayer->GetAbsVelocity() * (gpGlobals->interval_per_tick * MIN( pPlayer->GetAbsVelocity().Length() / m_shadow.maxSpeed, 1.0f) );
+		float fDot = vSpeedAddon.Dot( vCurrentOffsetDirection );
+		end += vCurrentOffsetDirection * MAX( 0.0f, fDot );
+	}
 
 	// Translate hold position and angles across portal
 	if ( pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
@@ -3108,6 +3279,445 @@ bool CGrabController::UpdateObject( CBasePlayer *pPlayer, float flError )
 	return true;
 }
 
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+bool CGrabController::UpdateObjectPortal2( CBasePlayer *pPlayer, float flError )
+{
+	CBaseEntity *pEntity = GetAttached();
+
+	if ( pEntity )
+	{
+		if ( pEntity->GetMoveParent() != NULL && pEntity->GetMoveParent() != pPlayer )
+		{
+			// Parented to something else now! Detach!
+			DetachEntity( false );
+			return true;
+		}
+	}
+
+	CBaseEntity *pPenetratedEntity = m_PenetratedEntity.Get();
+	if( pPenetratedEntity )
+	{
+		//FindClosestPassableSpace( pPenetratedEntity, Vector( 0.0f, 0.0f, 1.0f ) );
+		IPhysicsObject *pPhysObject = pPenetratedEntity->VPhysicsGetObject();
+		if( pPhysObject )
+			pPhysObject->Wake();
+
+		m_PenetratedEntity = NULL; //assume we won
+	}
+
+	
+#if !defined ( CLIENT_DLL )
+	if ( !pEntity || ComputeError() > flError || pPlayer->GetGroundEntity() == pEntity || !pEntity->VPhysicsGetObject() )
+	{
+		return false;
+	}
+#endif 
+
+#if !defined ( CLIENT_DLL )
+	IPhysicsObject *pPhys = pEntity->VPhysicsGetObject();
+	//Adrian: Oops, our object became motion disabled, let go!
+	if ( pPhys && pPhys->IsMoveable() == false )
+	{
+		return false;
+	}
+#endif 
+
+	Vector forward, right, up;
+	QAngle playerAngles = pPlayer->EyeAngles();
+
+	float pitch = AngleDistance(playerAngles.x,0);
+	if( !m_bAllowObjectOverhead )
+	{
+		playerAngles.x = clamp( pitch, -75, 75 );
+	}
+	else
+	{
+		playerAngles.x = clamp( pitch, -90, 75 );
+	}
+
+	AngleVectors( playerAngles, &forward, &right, &up );
+
+	Vector start = pPlayer->Weapon_ShootPosition();
+
+	// If the player is upside down then we need to hold the box closer to their feet.
+	if ( up.z < 0.0f )
+		start += pPlayer->GetViewOffset() * up.z;
+	if ( right.z < 0.0f )
+		start += pPlayer->GetViewOffset() * right.z;
+
+	CPortal_Player *pPortalPlayer = ToPortalPlayer( pPlayer );
+
+
+	bool bLookingAtHeldPortal = true;
+	CProp_Portal *pPortal = pPortalPlayer->GetHeldObjectPortal();
+
+	// Find out if it's being held across a portal
+	if ( !pPortal )
+	{
+		// If the portal is invalid make sure we don't try to hold it across the portal
+		pPortalPlayer->SetHeldObjectOnOppositeSideOfPortal( false );
+	}
+	 
+	if ( pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
+	{
+		Ray_t rayPortalTest;
+		rayPortalTest.Init( start, start + forward * 1024.0f );
+
+		// Check if we're looking at the portal we're holding through
+		if ( pPortal )
+		{
+			if ( UTIL_IntersectRayWithPortal( rayPortalTest, pPortal ) < 0.0f )
+			{
+				bLookingAtHeldPortal = false;
+			}
+		}
+		// If our end point hasn't gone into the portal yet we at least need to know what portal is in front of us
+		else
+		{
+			int iPortalCount = CProp_Portal_Shared::AllPortals.Count();
+			if( iPortalCount != 0 )
+			{
+				CProp_Portal **pPortals = CProp_Portal_Shared::AllPortals.Base();
+				float fMinDist = 2.0f;
+				for( int i = 0; i != iPortalCount; ++i )
+				{
+					CProp_Portal *pTempPortal = pPortals[i];
+					if( pTempPortal->m_bActivated &&
+						(pTempPortal->m_hLinkedPortal.Get() != NULL) )
+					{
+						float fDist = UTIL_IntersectRayWithPortal( rayPortalTest, pTempPortal );
+						if( (fDist >= 0.0f) && (fDist < fMinDist) )
+						{
+							fMinDist = fDist;
+							pPortal = pTempPortal;
+						}
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		pPortal = NULL;
+	}
+#define HIDE_PORTAL2_ERRORS
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+	pPortalPlayer->m_GrabControllerPersistentVars.m_hLookingThroughPortalLastUpdate = bLookingAtHeldPortal ? pPortal : NULL; //bLookingAtHeldPortal is true for cases where we're simply looking at a portal as well as holding across a portal
+	if( !pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() && (pPortal == pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch) )
+	{
+		pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch = NULL; //end oscillation watch if we actually look through the portal
+	}
+#endif
+#endif
+	QAngle qEntityAngles = pEntity->GetAbsAngles();
+
+	if ( pPortal )
+	{
+		// If the portal isn't linked we need to drop the object
+		if ( !pPortal->m_hLinkedPortal.Get() )
+		{
+			pPlayer->ForceDropOfCarriedPhysObjects();
+			return false;
+		}
+
+		UTIL_Portal_AngleTransform( pPortal->m_hLinkedPortal->MatrixThisToLinked(), qEntityAngles, qEntityAngles );
+	}
+
+	// Now clamp a sphere of object radius at end to the player's bbox
+#if 0
+#if defined( GAME_DLL )
+	Vector radial = physcollision->CollideGetExtent( pPhys->GetCollide(), vec3_origin, qEntityAngles, -forward );
+#else
+	Vector radial;
+	{
+		vcollide_t *pVCollide = modelinfo->GetVCollide( pEntity->GetModelIndex() );
+		if( pVCollide && (pVCollide->solidCount > 0) )
+		{
+			radial = physcollision->CollideGetExtent( pVCollide->solids[0], vec3_origin, qEntityAngles, -forward );
+		}
+		else
+		{
+			CCollisionProperty *pCollisionProp = pEntity->CollisionProp();
+			if( pCollisionProp )
+			{
+				pCollisionProp->CalcNearestPoint( start, &radial );
+				radial -= start;
+			}
+			else
+			{
+				radial = vec3_origin;
+			}
+		}
+	}
+#endif
+#endif
+	
+	// Now clamp a sphere of object radius at end to the player's bbox
+	Vector radial = physcollision->CollideGetExtent( pPhys->GetCollide(), vec3_origin, qEntityAngles, -forward );
+	Vector player2d = pPlayer->CollisionProp()->OBBMaxs();
+	float playerRadius = player2d.Length2D();
+
+	float radius = playerRadius + radial.Length();
+
+	float distance = 24 + radius;
+
+	// Add the prop's distance offset
+	distance += m_flDistanceOffset;
+
+	pitch = AngleDistance(playerAngles.x,0);
+
+	float flUpOffset = RemapValClamped( fabs(pitch), 0.0f, 75.0f, 1.0f, 0.0f );
+
+	Vector end;
+//#ifndef HIDE_PORTAL2_ERRORS
+	if ( player_hold_object_in_column.GetBool() )
+	{
+		Vector player2dForward = CrossProduct( Vector(0,0,1), right );
+		Vector point = start + ( player2dForward * distance );
+		float intersection = IntersectRayWithPlane( start, forward, player2dForward, -DotProduct( -player2dForward, point ) );
+		distance = clamp( intersection, 24, player_hold_column_max_size.GetFloat() );
+	}
+//#endif
+	trace_t	tr;
+	CTraceFilterSkipTwoEntities traceFilter( pPlayer, pEntity, COLLISION_GROUP_NONE );
+	Ray_t ray;
+	ray.Init( start, start + forward * distance  + up * flUpOffset  );
+
+	//enginetrace->TraceRay( ray, MASK_SOLID_BRUSHONLY, &traceFilter, &tr );
+	UTIL_Portal_TraceRay( ray, MASK_SOLID_BRUSHONLY, &traceFilter, &tr );
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+	if( !tr.DidHit() )
+	{
+		pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch = NULL; //end oscillation watch if we trace into open air
+	}
+	else if( pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch.Get() != NULL )
+	{
+		//make sure it's also not obscenely far away from the oscillation watch portal
+		CProp_Portal *pOscillationPortal = pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch.Get();
+		Vector vOscillationPortalToTraceHit = tr.endpos - pOscillationPortal->m_ptOrigin;
+
+		if( (fabs(pOscillationPortal->m_vRight.Dot(vOscillationPortalToTraceHit)) >= (pOscillationPortal->GetHalfWidth() * 2.0f)) ||
+			(fabs(pOscillationPortal->m_vUp.Dot(vOscillationPortalToTraceHit)) >= (pOscillationPortal->GetHalfHeight() * 2.0f)) ||
+			(fabs(pOscillationPortal->m_vForward.Dot(vOscillationPortalToTraceHit)) >= 5.0f) )
+		{
+			pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch = NULL; //trace point has gone reasonably far from the portal
+		}
+	}
+#endif
+#endif
+	float flTraceDist = distance * tr.fraction;
+	if ( flTraceDist < radius )
+		flTraceDist = radius;
+
+	Vector direction = ray.m_Delta.Normalized();
+	end = start + ( direction * flTraceDist ) +
+				  ( up * flUpOffset );
+
+	Vector playerMins, playerMaxs, nearest;
+	pPlayer->CollisionProp()->WorldSpaceAABB( &playerMins, &playerMaxs );
+	Vector playerLine = pPlayer->CollisionProp()->WorldSpaceCenter();
+#ifndef HIDE_PORTAL2_ERRORS
+	float fHeight = pPortalPlayer->GetHullHeight();
+	Vector vUp = pPortalPlayer->GetPortalPlayerLocalData().m_Up;
+#endif
+	// Note: We can't use pPlayer->CollisionProp()->WorldSpaceCenter() because our player's bbox doesn't rotate on stick power
+	CalcClosestPointOnLine( end, playerLine+Vector(0,0,playerMins.z), playerLine+Vector(0,0,playerMaxs.z), nearest, NULL );
+	/*NDebugOverlay::Sphere( nearest, 10, 255, 0, 0, true, 0.1f );
+	NDebugOverlay::Sphere( playerLine, 10, 0, 0, 255, true, 0.1f );*/
+
+	//
+	//
+	//
+
+	// Trace down from the held object and see if we need to bump up off the floor
+	const float flHalfRadius = radius/2.0f;
+	Vector vecMaxs( flHalfRadius, flHalfRadius, 0 );
+	Vector vecMins = -vecMaxs;
+	Vector vecEndPos = end - Vector(0,0,flHalfRadius+1);
+
+	UTIL_ClearTrace( tr );
+
+	ray.Init( end + Vector(0,0,flHalfRadius+1), vecEndPos );
+	if ( player_held_object_transform_bump_ray.GetBool() )
+	{
+		if ( pPortal != NULL && pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
+		{
+			VMatrix matThisToLinked = pPortal->MatrixThisToLinked();
+			Ray_t portalRay = ray;
+			UTIL_Portal_RayTransform( matThisToLinked, portalRay, ray );
+		}
+	}
+	
+	UTIL_Portal_TraceRay( ray, MASK_SOLID_BRUSHONLY, &traceFilter, &tr );
+
+	// Hold onto our last frame because there's a case where moving through a portal creates
+	// a brief pop as you hit a solid "no man's land" while traversing the portal
+	static float flLastDelta = 0.0f;
+
+	if ( !tr.startsolid )
+	{
+		if ( tr.fraction < 1.0f )
+		{
+			flLastDelta = radius * (1.0f-tr.fraction);		
+		}
+		else
+		{
+			flLastDelta = 0.0f;
+		}
+	}
+
+	end.z += flLastDelta;
+
+	if( !m_bAllowObjectOverhead )
+	{
+		Vector delta = end - nearest;
+		float len = VectorNormalize(delta);
+		if ( len < radius )
+		{
+			end = nearest + radius * delta;
+		}
+	}
+#ifndef HIDE_PORTAL2_ERRORS
+#if !defined ( CLIENT_DLL )
+	// Send these down to the client
+	pPortalPlayer->m_vecCarriedObjectAngles = m_attachedAnglesPlayerSpace;
+#endif
+#endif
+	QAngle angles = TransformAnglesFromPlayerSpace( m_attachedAnglesPlayerSpace, pPlayer );
+
+	//Show overlays of radius
+	if ( g_debug_physcannon.GetBool() )
+	{
+		NDebugOverlay::Box( end, -Vector( 2,2,2 ), Vector(2,2,2), 0, 255, 0, true, 0 );
+
+		NDebugOverlay::Box( GetAttached()->WorldSpaceCenter(), 
+			-Vector( radius, radius, radius), 
+			Vector( radius, radius, radius ),
+			255, 0, 0,
+			true,
+			0.0f );
+	}
+
+
+	// If it has a preferred orientation, update to ensure we're still oriented correctly.
+	Pickup_GetPreferredCarryAngles( pEntity, pPlayer, pPlayer->EntityToWorldTransform(), angles );
+
+	// We may be holding a prop that has preferred carry angles
+	if ( m_bHasPreferredCarryAngles )
+	{
+		matrix3x4_t tmp;
+		ComputePlayerMatrix( pPlayer, tmp );
+		angles = TransformAnglesToWorldSpace( m_vecPreferredCarryAngles, tmp );
+	}
+
+
+
+	matrix3x4_t attachedToWorld;
+	Vector offset;
+	AngleMatrix( angles, attachedToWorld );
+	VectorRotate( m_attachedPositionObjectSpace, attachedToWorld, offset );
+
+	//if the player is moving pretty fast. Start moving the object more towards where they're going to be instead of where they are.
+	{
+		Vector vCurrentOffsetDirection = end - pPlayer->WorldSpaceCenter();
+		vCurrentOffsetDirection.NormalizeInPlace();
+
+		Vector vSpeedAddon = pPlayer->GetAbsVelocity() * (gpGlobals->interval_per_tick * MIN( pPlayer->GetAbsVelocity().Length() / m_shadow.maxSpeed, 1.0f) );
+		float fDot = vSpeedAddon.Dot( vCurrentOffsetDirection );
+		end += vCurrentOffsetDirection * MAX( 0.0f, fDot );
+	}
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+	pPortalPlayer->m_GrabControllerPersistentVars.m_bLastUpdateWasForcedPull = false;
+#endif
+#endif
+	// Translate hold position and angles across portal
+	if ( pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
+	{
+		CProp_Portal *pPortalLinked = pPortal->m_hLinkedPortal;
+		if ( pPortal && pPortal->m_bActivated && pPortalLinked != NULL )
+		{
+			Vector vTeleportedPosition;
+			QAngle qTeleportedAngles;
+
+			bool bHoldRayCrossesHeldPortal;
+			if( !bLookingAtHeldPortal && pPortalPlayer->IsHeldObjectOnOppositeSideOfPortal() )
+			{
+				Ray_t lastChanceRay;
+				lastChanceRay.Init( start, end - offset );
+				float fLastChanceCloser = 2.0f;
+				bHoldRayCrossesHeldPortal = ( UTIL_Portal_FirstAlongRay( lastChanceRay, fLastChanceCloser ) == pPortalPlayer->GetHeldObjectPortal() );
+			}
+			else
+			{
+				bHoldRayCrossesHeldPortal = false;
+			}
+
+			if ( !bLookingAtHeldPortal && !bHoldRayCrossesHeldPortal && ( start - pPortal->GetAbsOrigin() ).Length() > distance - radius )
+			{
+				// Pull the object through the portal
+				Vector vPortalLinkedForward;
+				pPortalLinked->GetVectors( &vPortalLinkedForward, NULL, NULL );
+				vTeleportedPosition = pPortalLinked->GetAbsOrigin() - vPortalLinkedForward * ( 1.0f + offset.Length() );
+				qTeleportedAngles = pPortalLinked->GetAbsAngles();
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+				pPortalPlayer->m_GrabControllerPersistentVars.m_bLastUpdateWasForcedPull = true;
+#endif
+#endif
+			}
+			else
+			{
+				// Translate hold position and angles across the portal
+				VMatrix matThisToLinked = pPortal->MatrixThisToLinked();
+				UTIL_Portal_PointTransform( matThisToLinked, end - offset, vTeleportedPosition );
+				UTIL_Portal_AngleTransform( matThisToLinked, angles, qTeleportedAngles );
+			}
+
+			SetTargetPosition( vTeleportedPosition, qTeleportedAngles );
+			pPortalPlayer->SetHeldObjectPortal( pPortal );
+		}
+		else
+		{
+			pPlayer->ForceDropOfCarriedPhysObjects();
+		}
+	}
+	else
+	{
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+		if( pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch.Get() != NULL )
+		{
+			//prevent an oscillation bug where our target position makes the held object teleport through a portal this tick, then teleport right back the next tick because we're not looking at the portal
+			CProp_Portal *pOscillationPortal = pPortalPlayer->m_GrabControllerPersistentVars.m_hOscillationWatch;
+			Vector vTargetPosition = end - offset;
+			float fPlaneDist = pOscillationPortal->m_plane_Origin.normal.Dot( vTargetPosition ) - pOscillationPortal->m_plane_Origin.dist;
+			if( fPlaneDist < 1.0f )
+			{
+				end += pOscillationPortal->m_plane_Origin.normal * (1.0f - fPlaneDist); //bump out to a minimum of 1 inch in front of the portal plane
+			}
+		}
+#endif
+#endif
+		SetTargetPosition( end - offset, angles );
+		pPortalPlayer->SetHeldObjectPortal( NULL );
+	}
+#ifndef HIDE_PORTAL2_ERRORS
+#if defined( GAME_DLL )
+	if( GetAttached() )
+	{
+		pPortalPlayer->m_vecCarriedObject_CurPosToTargetPos = TransformVectorToPlayerSpace( m_shadow.targetPosition - GetAttached()->GetAbsOrigin(), pPlayer );
+		pPortalPlayer->m_vecCarriedObject_CurAngToTargetAng = m_shadow.targetRotation - GetAttached()->GetAbsAngles();
+	}
+#endif
+#endif
+
+	return true;
+}
+
 void CWeaponPhysCannon::UpdateObject( void )
 {
 	CPortal_Player *pPlayer = ToPortalPlayer( GetOwner() );
@@ -3139,10 +3749,6 @@ void CWeaponPhysCannon::DetachObject( bool playSound, bool wasLaunched )
 		{
 			pOwner->RumbleEffect( RUMBLE_357, 0, RUMBLE_FLAG_RESTART );
 		}
-#ifdef WIN32
-		// NVNT clear constant force
-		HapticSetConstantForce(pOwner,Vector(0,0,0));
-#endif
 	}
 
 	CBaseEntity *pObject = m_grabController.GetAttached();

@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//====== Copyright © 1996-2005, Valve Corporation, All rights reserved. =======
 //
 // Purpose: 
 //
@@ -6,7 +6,7 @@
 
 #include "cbase.h"
 #include "portal_gamestats.h"
-#include "tier1/utlbuffer.h"
+#include "tier1/UtlBuffer.h"
 #include "portal_player.h"
 
 #define PORTALSTATS_TRIMEVENT( varName, varType )\
@@ -242,7 +242,7 @@ void Portal_Gamestats_LevelStats_t::LoadSubChunksFromBuffer( CUtlBuffer &LoadBuf
 					DeathStat.ptPositionOfDeath.y = LoadBuffer.GetFloat();
 					DeathStat.ptPositionOfDeath.z = LoadBuffer.GetFloat();
 					DeathStat.iDamageType = LoadBuffer.GetInt();
-					LoadBuffer.GetString( DeathStat.szAttackerClassName );
+					LoadBuffer.GetString( DeathStat.szAttackerClassName, sizeof( DeathStat.szAttackerClassName ) );
 				}
 
 				break;
@@ -286,7 +286,7 @@ void Portal_Gamestats_LevelStats_t::LoadSubChunksFromBuffer( CUtlBuffer &LoadBuf
 					UseEvent.vTraceDelta.y = LoadBuffer.GetFloat();
 					UseEvent.vTraceDelta.z = LoadBuffer.GetFloat();
 
-					LoadBuffer.GetString( UseEvent.szUseEntityClassName );
+					LoadBuffer.GetString( UseEvent.szUseEntityClassName, sizeof( UseEvent.szUseEntityClassName ) );
 				}
 
 				break;
@@ -457,7 +457,7 @@ void CPortalGameStats::LoadCustomDataFromBuffer( CUtlBuffer &LoadBuffer )
 			{
 				//map chunk				
 				char szMapName[256];
-				LoadBuffer.GetString( szMapName );
+				LoadBuffer.GetString( szMapName, 256 );
 
 				Portal_Gamestats_LevelStats_t *mapStats = FindOrAddMapStats( szMapName );
 				mapStats->LoadSubChunksFromBuffer( LoadBuffer, iChunkEndPosition );
@@ -669,6 +669,7 @@ static char const *portalMaps[] =
 
 bool CPortalGameStats::UserPlayedAllTheMaps( void )
 {
+#if 0
 	int c = ARRAYSIZE( portalMaps );
 	for ( int i = 0; i < c; ++i )
 	{
@@ -678,6 +679,9 @@ bool CPortalGameStats::UserPlayedAllTheMaps( void )
 	}
 
 	return true;
+#else // BaseClass
+	return false;
+#endif
 }
 
 

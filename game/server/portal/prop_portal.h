@@ -35,6 +35,9 @@ public:
 
 	CNetworkHandle( CProp_Portal, m_hLinkedPortal ); //the portal this portal is linked to
 	
+	void					BroadcastPortalEvent( PortalEvent_t nEventType );
+
+	CUtlVector<EHANDLE>		m_PortalEventListeners;			// Collection of entities (by handle) who wish to receive notification of portal events (fizzle, moved, etc)
 
 	VMatrix					m_matrixThisToLinked; //the matrix that will transform a point relative to this portal, to a point relative to the linked portal
 	CNetworkVar( bool, m_bActivated ); //a portal can exist and not be active
@@ -56,6 +59,7 @@ public:
 
 	COutputEvent m_OnPlacedSuccessfully;		// Output in hammer for when this portal was successfully placed (not attempted and fizzed).
 
+	Vector m_vForward, m_vUp, m_vRight;
 	cplane_t m_plane_Origin; //a portal plane on the entity origin
 
 	CPhysicsCloneArea		*m_pAttachedCloningArea;
@@ -126,6 +130,12 @@ public:
 
 	virtual void			PortalSimulator_TookOwnershipOfEntity( CBaseEntity *pEntity );
 	virtual void			PortalSimulator_ReleasedOwnershipOfEntity( CBaseEntity *pEntity );
+	
+	// Add or remove listeners
+	void					AddPortalEventListener( EHANDLE hListener );
+	void					RemovePortalEventListener( EHANDLE hListener );
+
+	QAngle					GetLastAngles() { return m_qLastPortalAngles; }
 
 private:
 	unsigned char			m_iLinkageGroupID; //a group ID specifying which portals this one can possibly link to
@@ -133,6 +143,8 @@ private:
 	CPhysCollide			*m_pCollisionShape;
 	void					RemovePortalMicAndSpeaker();	// Cleans up the portal's internal audio members
 	void					UpdateCorners( void );			// Updates the four corners of this portal on spawn and placement
+
+	QAngle					m_qLastPortalAngles;
 
 public:
 	inline unsigned char	GetLinkageGroup( void ) const { return m_iLinkageGroupID; };

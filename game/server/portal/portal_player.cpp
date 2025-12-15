@@ -33,6 +33,8 @@
 #include "soundenvelope.h"
 #include "ai_speech.h"		// For expressors, vcd playing
 #include "sceneentity.h"	// has the VCD precache function
+#include "collisionutils.h"
+#include "sendprop_priorities.h"
 
 // Max mass the player can lift with +use
 #define PORTAL_PLAYER_MAX_LIFT_MASS 85
@@ -141,7 +143,34 @@ END_DATADESC()
 
 LINK_ENTITY_TO_CLASS( player, CPortal_Player );
 
+extern void SendProxy_Origin( const SendProp *pProp, const void *pStruct, const void *pData, DVariant *pOut, int iElement, int objectID );
+
+// specific to the local player
+BEGIN_SEND_TABLE_NOBASE( CPortal_Player, DT_PortalLocalPlayerExclusive )
+	// send a hi-res origin and view offset to the local player for use in prediction
+	SendPropVectorXY(SENDINFO(m_vecOrigin),               -1, SPROP_NOSCALE, 0.0f, HIGH_DEFAULT, SendProxy_OriginXY, SENDPROP_LOCALPLAYER_ORIGINXY_PRIORITY ),
+	SendPropFloat   (SENDINFO_VECTORELEM(m_vecOrigin, 2), -1, SPROP_NOSCALE, 0.0f, HIGH_DEFAULT, SendProxy_OriginZ, SENDPROP_LOCALPLAYER_ORIGINZ_PRIORITY ),
+	SendPropVector	(SENDINFO(m_vecViewOffset), -1, SPROP_NOSCALE, 0.0f, HIGH_DEFAULT ),
+END_SEND_TABLE()
+
+// all players except the local player
+BEGIN_SEND_TABLE_NOBASE( CPortal_Player, DT_PortalNonLocalPlayerExclusive )
+	// send a lo-res origin and view offset to other players
+	// send a lo-res origin to other players
+	SendPropVectorXY( SENDINFO( m_vecOrigin ), 				 CELL_BASEENTITY_ORIGIN_CELL_BITS, SPROP_CELL_COORD_LOWPRECISION, 0.0f, HIGH_DEFAULT, CBaseEntity::SendProxy_CellOriginXY, SENDPROP_NONLOCALPLAYER_ORIGINXY_PRIORITY ),
+	SendPropFloat   ( SENDINFO_VECTORELEM( m_vecOrigin, 2 ), CELL_BASEENTITY_ORIGIN_CELL_BITS, SPROP_CELL_COORD_LOWPRECISION, 0.0f, HIGH_DEFAULT, CBaseEntity::SendProxy_CellOriginZ, SENDPROP_NONLOCALPLAYER_ORIGINZ_PRIORITY ),
+	SendPropFloat	(SENDINFO_VECTORELEM(m_vecViewOffset, 0), 10, SPROP_CHANGES_OFTEN, -128.0, 128.0f),
+	SendPropFloat	(SENDINFO_VECTORELEM(m_vecViewOffset, 1), 10, SPROP_CHANGES_OFTEN, -128.0, 128.0f),
+	SendPropFloat	(SENDINFO_VECTORELEM(m_vecViewOffset, 2), 10, SPROP_CHANGES_OFTEN, -128.0, 128.0f),
+END_SEND_TABLE()
+
 IMPLEMENT_SERVERCLASS_ST(CPortal_Player, DT_Portal_Player)
+
+SendPropExclude( "DT_BaseEntity", "m_vecOrigin" ),
+SendPropExclude( "DT_LocalPlayerExclusive", "m_vecViewOffset[0]" ),
+SendPropExclude( "DT_LocalPlayerExclusive", "m_vecViewOffset[1]" ),
+SendPropExclude( "DT_LocalPlayerExclusive", "m_vecViewOffset[2]" ),
+
 SendPropExclude( "DT_BaseAnimating", "m_flPlaybackRate" ),	
 SendPropExclude( "DT_BaseAnimating", "m_nSequence" ),
 SendPropExclude( "DT_BaseAnimating", "m_nNewSequenceParity" ),
@@ -169,6 +198,22 @@ SendPropEHandle( SENDINFO( m_hPortalEnvironment ) ),
 SendPropEHandle( SENDINFO( m_hSurroundingLiquidPortal ) ),
 SendPropBool( SENDINFO( m_bSuppressingCrosshair ) ),
 SendPropExclude( "DT_BaseAnimating", "m_flPoseParameter" ),
+SendPropInt( SENDINFO( m_PaintedPowerType ) ),
+// SendPropDataTable( SENDINFO( m_PaintedPowerTimer ) ), // FIXME!
+SendPropVector( SENDINFO( m_vPreUpdateVelocity ) ),
+SendPropInt( SENDINFO( m_InAirState ) ),
+SendPropBool( SENDINFO( m_bJumpedThisFrame ) ),
+SendPropBool( SENDINFO( m_bBouncedThisFrame ) ),
+
+SendPropFloat( SENDINFO( m_fBouncedTime ) ),
+
+SendPropEHandle( SENDINFO( m_hTractorBeam ) ),
+
+// Data that only gets sent to the local player
+SendPropDataTable( "portallocaldata", 0, &REFERENCE_SEND_TABLE(DT_PortalLocalPlayerExclusive), SendProxy_SendLocalDataTable ),
+
+// Data that gets sent to all other players
+SendPropDataTable( "portalnonlocaldata", 0, &REFERENCE_SEND_TABLE(DT_PortalNonLocalPlayerExclusive), SendProxy_SendNonLocalDataTable ),
 
 END_SEND_TABLE()
 
@@ -185,9 +230,7 @@ BEGIN_DATADESC( CPortal_Player )
 	DEFINE_FIELD( m_StatsThisLevel.iNumStepsTaken, FIELD_INTEGER ),
 	DEFINE_FIELD( m_StatsThisLevel.fNumSecondsTaken, FIELD_FLOAT ),
 	DEFINE_FIELD( m_fTimeLastNumSecondsUpdate, FIELD_TIME ),
-	DEFINE_FIELD( m_iNumCamerasDetatched, FIELD_INTEGER ),
 	DEFINE_FIELD( m_bPitchReorientation, FIELD_BOOLEAN ),
-	DEFINE_FIELD( m_bIsRegenerating, FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_fNeuroToxinDamageTime, FIELD_TIME ),
 	DEFINE_FIELD( m_hPortalEnvironment, FIELD_EHANDLE ),
 	DEFINE_FIELD( m_flExpressionLoopTime, FIELD_TIME ),
@@ -206,12 +249,16 @@ BEGIN_DATADESC( CPortal_Player )
 	DEFINE_FIELD( m_bSuppressingCrosshair, FIELD_BOOLEAN ),
 	//DEFINE_FIELD ( m_PlayerAnimState, CPortalPlayerAnimState ),
 	//DEFINE_FIELD ( m_StatsThisLevel, PortalPlayerStatistics_t ),
+	DEFINE_FIELD( m_InAirState, FIELD_INTEGER ),
+	DEFINE_FIELD( m_PaintedPowerType, FIELD_INTEGER ),
+	DEFINE_FIELD( m_vPreUpdateVelocity, FIELD_VECTOR ),
+	DEFINE_FIELD( m_bJumpedThisFrame, FIELD_BOOLEAN ),
+	DEFINE_FIELD( m_bBouncedThisFrame, FIELD_BOOLEAN ),
+	DEFINE_FIELD( m_fBouncedTime, FIELD_FLOAT ),
 
 	DEFINE_EMBEDDEDBYREF( m_pExpresser ),
 
 END_DATADESC()
-
-ConVar sv_regeneration_wait_time ("sv_regeneration_wait_time", "1.0", FCVAR_REPLICATED );
 
 const char *g_pszChellModel = "models/player/chell.mdl";
 const char *g_pszPlayerModel = g_pszChellModel;
@@ -241,7 +288,6 @@ extern float IntervalDistance( float x, float x0, float x1 );
 
 CPortal_Player::CPortal_Player()
 {
-
 	m_PlayerAnimState = CreatePortalPlayerAnimState( this );
 	CreateExpresser();
 
@@ -266,6 +312,25 @@ CPortal_Player::CPortal_Player()
 	m_hExpressionSceneEnt = NULL;
 	m_flExpressionLoopTime = 0.0f;
 	m_bSuppressingCrosshair = false;
+
+	m_bCatapulted = false;
+
+	m_hTractorBeam = NULL;
+
+	m_nTractorBeamCount = 0;
+
+	m_vInputVector = vec3_origin;
+	m_flCachedJumpPowerTime = -FLT_MAX;
+	m_flSpeedDecelerationTime = 0.0f;
+	m_flPredictedJumpTime = 0.f;
+	m_PaintedPowerType = NO_POWER;
+	m_InAirState = ON_GROUND;
+	m_PaintedPowerTimer.Invalidate();
+	m_vPreUpdateVelocity = vec3_origin;
+	m_bJumpedThisFrame = false;
+	m_bBouncedThisFrame = false;
+	m_fBouncedTime = 0.0;
+	m_flLastSuppressedBounceTime = 0.0;
 }
 
 CPortal_Player::~CPortal_Player( void )
@@ -304,6 +369,7 @@ void CPortal_Player::Precache( void )
 	PrecacheModel( g_pszChellModel );
 
 	PrecacheScriptSound( "NPC_Citizen.die" );
+	PrecacheScriptSound( "Player.JumpPowerUse" );
 }
 
 void CPortal_Player::CreateSounds()
@@ -425,6 +491,8 @@ void CPortal_Player::Spawn(void)
 	m_Local.m_bDucked = false;
 
 	SetPlayerUnderwater(false);
+	
+	m_vPrevGroundNormal = Vector(0,0,1);
 
 #ifdef PORTAL_MP
 	PickTeam();
@@ -491,7 +559,7 @@ void CPortal_Player::SetPlayerModel( void )
 	const char *szModelName = NULL;
 	const char *pszCurrentModelName = modelinfo->GetModelName( GetModel());
 
-	szModelName = engine->GetClientConVarValue( engine->IndexOfEdict( edict() ), "cl_playermodel" );
+	szModelName = engine->GetClientConVarValue( ENTINDEX( edict() ), "cl_playermodel" );
 
 	if ( ValidatePlayerModel( szModelName ) == false )
 	{
@@ -549,15 +617,17 @@ void CPortal_Player::UpdateExpression( void )
 	GetExpresser()->SetOuter( this );
 
 	ClearExpression();
-	AI_Response *response = SpeakFindResponse( g_pszChellConcepts[iConcept] );
-	if ( !response )
+	AI_Response response;
+	CAI_Concept concept( g_pszChellConcepts[iConcept] );
+	bool result = FindResponse( response, concept );
+	if ( !result )
 	{
 		m_flExpressionLoopTime = gpGlobals->curtime + RandomFloat(30,40);
 		return;
 	}
 
-	char szScene[256] = { 0 };
-	response->GetResponse( szScene, sizeof(szScene) );
+	char szScene[ MAX_PATH ];
+	response.GetResponse( szScene, sizeof( szScene ) );
 
 	// Ignore updates that choose the same scene
 	if ( m_iszExpressionScene != NULL_STRING && stricmp( STRING(m_iszExpressionScene), szScene ) == 0 )
@@ -598,7 +668,18 @@ void CPortal_Player::PreThink( void )
 		vTempAngles[PITCH] -= 360.0f;
 	}
 
-	SetLocalAngles( vTempAngles );
+	SetLocalAngles( vTempAngles );	
+
+	if ( m_Local.m_bSlowMovement && m_Local.m_fTBeamEndTime != 0.0f && gpGlobals->curtime > m_Local.m_fTBeamEndTime + 1.0f )
+	{
+		m_Local.m_bSlowMovement = false;
+		SetGravity( 1.0f );
+
+		if ( VPhysicsGetObject() )
+		{
+			VPhysicsGetObject()->EnableGravity( true );
+		}
+	}
 
 	BaseClass::PreThink();
 
@@ -611,6 +692,10 @@ void CPortal_Player::PreThink( void )
 	m_vecTotalBulletForce = vec3_origin;
 
 	SetLocalAngles( vOldAngles );
+
+	// Cache the velocity before impact
+	if( HASPAINTMAP )
+		m_vPreUpdateVelocity = GetAbsVelocity();
 }
 
 void CPortal_Player::PostThink( void )
@@ -623,29 +708,6 @@ void CPortal_Player::PostThink( void )
 	QAngle angles = GetLocalAngles();
 	angles[PITCH] = 0;
 	SetLocalAngles( angles );
-
-	// Regenerate heath after 3 seconds
-	if ( IsAlive() && GetHealth() < GetMaxHealth() )
-	{
-		// Color to overlay on the screen while the player is taking damage
-		color32 hurtScreenOverlay = {64,0,0,64};
-
-		if ( gpGlobals->curtime > m_fTimeLastHurt + sv_regeneration_wait_time.GetFloat() )
-		{
-			TakeHealth( 1, DMG_GENERIC );
-			m_bIsRegenerating = true;
-
-			if ( GetHealth() >= GetMaxHealth() )
-			{
-				m_bIsRegenerating = false;
-			}
-		}
-		else
-		{
-			m_bIsRegenerating = false;
-			UTIL_ScreenFade( this, hurtScreenOverlay, 1.0f, 0.1f, FFADE_IN|FFADE_PURGE );
-		}
-	}
 
 	UpdatePortalPlaneSounds();
 	UpdateWooshSounds();
@@ -671,6 +733,9 @@ void CPortal_Player::PostThink( void )
 		Teleport( &vNewPos, NULL, &vForward );
 		m_bStuckOnPortalCollisionObject = false;
 	}
+	
+	// Update in air state
+	UpdateInAirState();
 }
 
 void CPortal_Player::PlayerDeathThink(void)
@@ -718,7 +783,7 @@ void CPortal_Player::PlayerDeathThink(void)
 
 	StopAnimation();
 
-	IncrementInterpolationFrame();
+	AddEffects( EF_NOINTERP );
 	m_flPlaybackRate = 0.0;
 
 	int fAnyButtonDown = (m_nButtons & ~IN_SCORE);
@@ -931,7 +996,7 @@ void CPortal_Player::DoAnimationEvent( PlayerAnimEvent_t event, int nData )
 // Purpose: Override setup bones so that is uses the render angles from
 //			the Portal animation state to setup the hitboxes.
 //-----------------------------------------------------------------------------
-void CPortal_Player::SetupBones( matrix3x4_t *pBoneToWorld, int boneMask )
+void CPortal_Player::SetupBones( matrix3x4a_t *pBoneToWorld, int boneMask )
 {
 	VPROF_BUDGET( "CBaseAnimating::SetupBones", VPROF_BUDGETGROUP_SERVER_ANIM );
 
@@ -943,7 +1008,7 @@ void CPortal_Player::SetupBones( matrix3x4_t *pBoneToWorld, int boneMask )
 	CStudioHdr *pStudioHdr = GetModelPtr( );
 
 	Vector pos[MAXSTUDIOBONES];
-	Quaternion q[MAXSTUDIOBONES];
+	QuaternionAligned q[MAXSTUDIOBONES];
 
 	// Adjust hit boxes based on IK driven offset.
 	Vector adjOrigin = GetAbsOrigin() + Vector( 0, 0, m_flEstIkOffset );
@@ -1769,16 +1834,20 @@ void CPortal_Player::Event_Killed( const CTakeDamageInfo &info )
 int CPortal_Player::OnTakeDamage( const CTakeDamageInfo &inputInfo )
 {
 	CTakeDamageInfo inputInfoCopy( inputInfo );
+	CBaseEntity *pAttacker = inputInfoCopy.GetAttacker();
+	CBaseEntity *pInflictor = inputInfoCopy.GetInflictor();
+	if ( FClassnameIs( pAttacker, "prop_paint_bomb" ) || FClassnameIs( pInflictor, "prop_paint_bomb" ) )
+	{
+		inputInfoCopy.SetDamage( 0 );
+		inputInfoCopy.SetDamageForce( vec3_origin );
+	}
 
 	// If you shoot yourself, make it hurt but push you less
-	if ( inputInfoCopy.GetAttacker() == this && inputInfoCopy.GetDamageType() == DMG_BULLET )
+	if ( pAttacker == this && inputInfoCopy.GetDamageType() == DMG_BULLET )
 	{
 		inputInfoCopy.ScaleDamage( 5.0f );
 		inputInfoCopy.ScaleDamageForce( 0.05f );
 	}
-
-	CBaseEntity *pAttacker = inputInfoCopy.GetAttacker();
-	CBaseEntity *pInflictor = inputInfoCopy.GetInflictor();
 
 	bool bIsTurret = false;
 
@@ -1946,6 +2015,23 @@ void CPortal_Player::ForceDropOfCarriedPhysObjects( CBaseEntity *pOnlyIfHoldingT
 {
 	m_bHeldObjectOnOppositeSideOfPortal = false;
 	BaseClass::ForceDropOfCarriedPhysObjects( pOnlyIfHoldingThis );
+}
+
+bool CPortal_Player::ShouldCollide( int collisionGroup, int contentsMask ) const
+{
+#if 1
+	if ( collisionGroup == COLLISION_GROUP_PLAYER_HELD )
+	{
+		extern bool HeldObjectShouldHitPlayer( CPortal_Player *pPlayer );
+		if ( !HeldObjectShouldHitPlayer( (CPortal_Player*)UTIL_GetLocalPlayer() ) )
+		{
+			// Held objects shouldn't collide with players 
+			// BUG: Not sure if we want this in MP, intention is to not collide with the holding player, not necessarily all.
+			return false;
+		}
+	}
+#endif
+	return BaseClass::ShouldCollide( collisionGroup, contentsMask );
 }
 
 void CPortal_Player::IncrementPortalsPlaced( void )
@@ -2168,6 +2254,52 @@ void CPortal_Player::SetupVisibility( CBaseEntity *pViewEntity, unsigned char *p
 	PortalSetupVisibility( this, area, pvs, pvssize );
 }
 
+void CPortal_Player::TestPortalTouch( void )
+{
+	CUtlVector<CProp_Portal*> TouchingPortals;
+	for ( int i = 0; i < CProp_Portal_Shared::AllPortals.Count(); ++i )
+	{
+		CProp_Portal *pPortal = CProp_Portal_Shared::AllPortals[i];
+		//if ( !pPortal )
+		//	continue;
+
+		if ( !pPortal->IsActivedAndLinked() )
+			continue;
+		
+		if ( UTIL_IsBoxIntersectingPortal( GetAbsOrigin(), WorldAlignSize(), pPortal ) )
+		{
+			TouchingPortals.AddToTail( pPortal );
+		}
+	}
+
+	float flLastDist = FLT_MAX;
+	CProp_Portal *pTouchingPortal = NULL;
+	for ( int i = 0; i < TouchingPortals.Count(); ++i )
+	{
+		CProp_Portal *pPortal = TouchingPortals[i];
+
+		float flDist = WorldSpaceCenter().DistTo( pPortal->WorldSpaceCenter() );
+		if ( flDist < flLastDist )
+		{
+			pTouchingPortal = pPortal;
+			flLastDist = flDist;
+		}
+	}
+
+	if ( pTouchingPortal )
+	{
+		if ( m_hPortalEnvironment )
+		{
+			m_hPortalEnvironment->EndTouch( this );
+		}
+		
+		if ( m_hPortalEnvironment.Get() != pTouchingPortal )
+		{
+			pTouchingPortal->StartTouch( this );
+		}
+		pTouchingPortal->Touch( this );
+	}
+}
 
 #ifdef PORTAL_MP
 

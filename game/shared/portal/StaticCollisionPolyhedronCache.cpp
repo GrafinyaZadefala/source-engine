@@ -1,4 +1,4 @@
-//========= Copyright Valve Corporation, All rights reserved. ============//
+//========= Copyright © 1996-2006, Valve Corporation, All rights reserved. ============//
 //
 // Purpose: 
 //
@@ -36,8 +36,8 @@ public:
 	}
 };
 
-static uint8 *s_BrushPolyhedronMemory = NULL;
-static uint8 *s_StaticPropPolyhedronMemory = NULL;
+static void *s_BrushPolyhedronMemory = NULL;
+static void *s_StaticPropPolyhedronMemory = NULL;
 
 CStaticCollisionPolyhedronCache g_StaticCollisionPolyhedronCache;
 
@@ -141,16 +141,15 @@ void CStaticCollisionPolyhedronCache::Update( void )
 	//brushes
 	{
 		int iBrush = 0;
-		CUtlVector<Vector4D> Planes;
+		CUtlVector<BrushSideInfo_t> brushSides;
 
 		float fStackPlanes[4 * 400]; //400 is a crapload of planes in my opinion
 
-		while( enginetrace->GetBrushInfo( iBrush, &Planes, NULL ) )
+		while( enginetrace->GetBrushInfo( iBrush, &brushSides, NULL ) )
 		{
-			int iPlaneCount = Planes.Count();
-			AssertMsg( iPlaneCount != 0, "A brush with no planes???????" );
 
-			const Vector4D *pReturnedPlanes = Planes.Base();
+			int iPlaneCount = brushSides.Count();
+			AssertMsg( iPlaneCount != 0, "A brush with no planes???????" );
 
 			CPolyhedron *pTempPolyhedron;
 
@@ -161,10 +160,10 @@ void CStaticCollisionPolyhedronCache::Update( void )
 
 				for( int i = 0; i != iPlaneCount; ++i )
 				{
-					pNonstackPlanes[(i * 4) + 0] = pReturnedPlanes[i].x;
-					pNonstackPlanes[(i * 4) + 1] = pReturnedPlanes[i].y;
-					pNonstackPlanes[(i * 4) + 2] = pReturnedPlanes[i].z;
-					pNonstackPlanes[(i * 4) + 3] = pReturnedPlanes[i].w;
+					pNonstackPlanes[(i * 4) + 0] = brushSides[i].plane.x;
+					pNonstackPlanes[(i * 4) + 1] = brushSides[i].plane.y;
+					pNonstackPlanes[(i * 4) + 2] = brushSides[i].plane.z;
+					pNonstackPlanes[(i * 4) + 3] = brushSides[i].plane.w;
 				}
 
 				pTempPolyhedron = GeneratePolyhedronFromPlanes( pNonstackPlanes, iPlaneCount, 0.01f, true );
@@ -175,10 +174,10 @@ void CStaticCollisionPolyhedronCache::Update( void )
 			{
 				for( int i = 0; i != iPlaneCount; ++i )
 				{
-					fStackPlanes[(i * 4) + 0] = pReturnedPlanes[i].x;
-					fStackPlanes[(i * 4) + 1] = pReturnedPlanes[i].y;
-					fStackPlanes[(i * 4) + 2] = pReturnedPlanes[i].z;
-					fStackPlanes[(i * 4) + 3] = pReturnedPlanes[i].w;
+					fStackPlanes[(i * 4) + 0] = brushSides[i].plane.x;
+					fStackPlanes[(i * 4) + 1] = brushSides[i].plane.y;
+					fStackPlanes[(i * 4) + 2] = brushSides[i].plane.z;
+					fStackPlanes[(i * 4) + 3] = brushSides[i].plane.w;
 				}
 
 				pTempPolyhedron = GeneratePolyhedronFromPlanes( fStackPlanes, iPlaneCount, 0.01f, true );
@@ -265,7 +264,7 @@ void CStaticCollisionPolyhedronCache::Update( void )
 				m_BrushPolyhedrons[i] = pDest;
 				pFinalDest += memRequired;
 
-				intp memoryOffset = ((uint8 *)pDest) - ((uint8 *)pSource);
+				int memoryOffset = ((uint8 *)pDest) - ((uint8 *)pSource);
 
 				memcpy( pDest, pSource, memRequired );
 				//move all the pointers to their new location.
@@ -425,7 +424,7 @@ void CStaticCollisionPolyhedronCache::Update( void )
 					m_StaticPropPolyhedrons[i] = pDest;
 					pFinalDest += memRequired;
 
-					intp memoryOffset = ((uint8 *)pDest) - ((uint8 *)pSource);
+					int memoryOffset = ((uint8 *)pDest) - ((uint8 *)pSource);
 
 					memcpy( pDest, pSource, memRequired );
 					//move all the pointers to their new location.
